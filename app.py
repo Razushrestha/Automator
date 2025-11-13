@@ -24,6 +24,13 @@ from email.mime.base import MIMEBase
 from email import encoders
 import re
 
+# SMS via Android phone
+try:
+    from ppadb.client import Client as AdbClient
+    ADB_AVAILABLE = True
+except ImportError:
+    ADB_AVAILABLE = False
+
 # ==================== CONFIG ====================
 
 PROFILE_DIR = os.path.join(os.getenv("APPDATA"), "AutoMessenger", "chrome_profile")
@@ -403,24 +410,243 @@ def send_email_smtp(email_to, subject, body, sender_email, sender_password, log_
         log_fn(f"❌ Failed to send email to {email_to}: {e}")
         return False
 
+# --- SMS sending via Android phone (ADB) ---
+def detect_android_device(log_fn):
+    """
+    Detect connected Android device via ADB.
+    Returns device object if found, None otherwise.
+    """
+    if not ADB_AVAILABLE:
+        log_fn("❌ ADB library not installed. Run: pip install pure-python-adb")
+        return None
+    
+    try:
+        # Connect to ADB server
+        adb = AdbClient(host="127.0.0.1", port=5037)
+        devices = adb.devices()
+        
+        if not devices:
+            log_fn("❌ No Android device detected. Enable USB Debugging and connect phone.")
+            return None
+        
+        device = devices[0]
+        log_fn(f"✅ Android device connected: {device.serial}")
+        return device
+    
+    except Exception as e:
+        log_fn(f"❌ ADB connection error: {e}")
+        log_fn("💡 Make sure ADB server is running. See SMS setup guide.")
+        return None
+
+def send_message_sms(device, phone, message, log_fn, stop_event, delay_seconds=5):
+    """
+    Send an SMS via Android phone using ADB.
+    Opens SMS app with pre-filled message and attempts to click send button automatically.
+    
+    Args:
+        device: ADB device object
+        phone: str, phone number
+        message: str, SMS text (160 chars recommended)
+        log_fn: callable, logging function
+        stop_event: threading.Event, used to stop execution gracefully
+        delay_seconds: int, seconds to wait after sending (default: 5)
+    
+    Returns:
+        bool, True if sent successfully, False otherwise
+    """
+    if stop_event.is_set():
+        log_fn("Stopped before sending SMS.")
+        return False
+    
+    try:
+        # Validate phone number
+        phone = str(phone).strip()
+        if not phone:
+            log_fn("❌ Empty phone number, skipping.")
+            return False
+        
+        # Clean phone number (remove spaces, dashes)
+        phone_clean = extract_phone_digits(phone)
+        
+        # Check message length
+        msg_len = len(message)
+        if msg_len > 160:
+            log_fn(f"⚠️ Message length {msg_len} chars (>160). May split into multiple SMS.")
+        
+        # Escape special characters for shell
+        message_escaped = message.replace('"', '\\"').replace("'", "\\'").replace("$", "\\$").replace("`", "\\`").replace("\\n", " ")
+        phone_escaped = phone_clean.replace('"', '\\"')
+        
+        log_fn(f"📱 Opening SMS for {phone_clean}...")
+        
+        # Open SMS app with pre-filled message
+        cmd = f'am start -a android.intent.action.SENDTO -d sms:{phone_escaped} --es sms_body "{message_escaped}"'
+        
+        # Execute command on Android device
+        result = device.shell(cmd)
+        
+        if "Error" in result or "error" in result.lower():
+            log_fn(f"❌ Failed to open SMS app: {result}")
+            return False
+        
+        # Wait for SMS app to open
+        time.sleep(2.5)
+        
+        log_fn(f"🔍 Attempting to auto-click send button...")
+        
+        # Get screen size for calculating tap positions
+        screen_size = device.shell("wm size")
+        width, height = 1080, 2400  # Default values
+        try:
+            size_match = re.search(r'(\d+)x(\d+)', screen_size)
+            if size_match:
+                width = int(size_match.group(1))
+                height = int(size_match.group(2))
+                log_fn(f"📐 Screen: {width}x{height}")
+        except:
+            pass
+        
+        # Method 0: Try to find send button using UI Automator
+        log_fn("🔍 Method 0: Analyzing UI for send button...")
+        try:
+            # Dump UI hierarchy to find send button
+            device.shell("uiautomator dump /sdcard/window_dump.xml")
+            time.sleep(0.5)
+            ui_dump = device.shell("cat /sdcard/window_dump.xml")
+            
+            # Search for send button patterns in XML
+            send_patterns = [
+                r'text="Send"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
+                r'content-desc="Send"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
+                r'resource-id="[^"]*send[^"]*"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
+                r'class="android.widget.ImageButton"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
+            ]
+            
+            send_button_found = False
+            for pattern in send_patterns:
+                matches = re.findall(pattern, ui_dump, re.IGNORECASE)
+                if matches:
+                    for match in matches:
+                        x1, y1, x2, y2 = int(match[0]), int(match[1]), int(match[2]), int(match[3])
+                        # Calculate center of button
+                        center_x = (x1 + x2) // 2
+                        center_y = (y1 + y2) // 2
+                        
+                        # Tap the center of the button
+                        log_fn(f"🎯 Found send button at ({center_x}, {center_y})")
+                        device.shell(f"input tap {center_x} {center_y}")
+                        time.sleep(0.5)
+                        send_button_found = True
+                        break
+                if send_button_found:
+                    break
+            
+            if send_button_found:
+                log_fn("✅ UI Automator: Send button clicked!")
+            else:
+                log_fn("⚠️ UI Automator: Send button not found in XML")
+        except Exception as e:
+            log_fn(f"⚠️ UI Automator failed: {e}")
+        
+        # Multiple send button click attempts
+        send_clicked = False
+        
+        # Method 1: Try common send button positions (right side of screen, various heights)
+        log_fn("🎯 Method 1: Trying common send button positions...")
+        send_positions = [
+            (int(width * 0.92), int(height * 0.93)),  # Bottom right (most common)
+            (int(width * 0.90), int(height * 0.95)),  # Lower right
+            (int(width * 0.88), int(height * 0.90)),  # Mid-right
+            (int(width * 0.85), int(height * 0.88)),  # Alternative position
+            (int(width * 0.95), int(height * 0.92)),  # Far right
+        ]
+        
+        for x, y in send_positions:
+            device.shell(f"input tap {x} {y}")
+            time.sleep(0.3)
+        
+        # Method 2: Try ENTER key (works in some SMS apps)
+        log_fn("⌨️ Method 2: Trying ENTER key...")
+        device.shell("input keyevent 66")  # KEYCODE_ENTER
+        time.sleep(0.3)
+        
+        # Method 3: Try D-PAD navigation + CENTER key
+        log_fn("🎮 Method 3: Trying D-PAD navigation...")
+        device.shell("input keyevent 22")  # KEYCODE_DPAD_RIGHT
+        time.sleep(0.2)
+        device.shell("input keyevent 23")  # KEYCODE_DPAD_CENTER
+        time.sleep(0.3)
+        
+        # Method 4: Try additional screen regions
+        log_fn("🔄 Method 4: Scanning screen for send button...")
+        additional_positions = [
+            (int(width * 0.80), int(height * 0.92)),  # Center-right bottom
+            (int(width * 0.75), int(height * 0.95)),  # Middle bottom
+            (int(width * 0.70), int(height * 0.93)),  # Left of center bottom
+        ]
+        
+        for x, y in additional_positions:
+            device.shell(f"input tap {x} {y}")
+            time.sleep(0.3)
+        
+        # Method 5: Try swipe gesture (some apps need swipe to send)
+        log_fn("👆 Method 5: Trying swipe gesture...")
+        start_x = int(width * 0.85)
+        start_y = int(height * 0.92)
+        end_x = int(width * 0.95)
+        end_y = int(height * 0.92)
+        device.shell(f"input swipe {start_x} {start_y} {end_x} {end_y} 100")
+        time.sleep(0.3)
+        
+        log_fn(f"✅ Auto-click attempts completed!")
+        log_fn(f"💡 If SMS wasn't sent, manually tap send button in next {delay_seconds} seconds...")
+        
+        # Give user backup time to manually tap if auto-click failed
+        for remaining in range(delay_seconds, 0, -1):
+            if stop_event.is_set():
+                break
+            if remaining <= 3:
+                log_fn(f"  ⏳ {remaining}...")
+            time.sleep(1)
+        
+        # Return to home screen
+        device.shell("input keyevent 3")  # KEYCODE_HOME
+        time.sleep(0.5)
+        
+        log_fn(f"✅ Moving to next contact")
+        return True
+    
+    except Exception as e:
+        log_fn(f"❌ Failed to send SMS to {phone}: {e}")
+        return False
+
 # --- Global UI Components Storage ---
 attachment_entry = None
 email_config_section = None
+sms_config_section = None
 platform_var = None
 
 def update_ui_for_platform():
     """Show/hide UI elements based on selected platform"""
-    global email_config_section
+    global email_config_section, sms_config_section
     platform = platform_var.get()
     
     if platform == "Email":
         email_config_section.pack(fill=tk.X, pady=12, after=section_platform)
+        if sms_config_section:
+            sms_config_section.pack_forget()
+    elif platform == "SMS":
+        if sms_config_section:
+            sms_config_section.pack(fill=tk.X, pady=12, after=section_platform)
+        email_config_section.pack_forget()
     else:
         email_config_section.pack_forget()
+        if sms_config_section:
+            sms_config_section.pack_forget()
 
 # ================= MODERN REACTIVE GUI =================
 root = tk.Tk()
-root.title("🚀 growHigh - Bulk Sender (WhatsApp & Email)")
+root.title("🚀 growHigh - Bulk Sender (WhatsApp | Email | SMS)")
 root.geometry("1000x950")
 root.resizable(True, True)
 root.minsize(800, 750)
@@ -542,7 +768,7 @@ def on_platform_change(*args):
 
 platform_var.trace('w', on_platform_change)
 
-platforms = ["WhatsApp", "Email"]
+platforms = ["WhatsApp", "Email", "SMS"]
 for platform in platforms:
     platform_rb = tk.Radiobutton(
         platform_frame, text=f"  {platform}",
@@ -579,6 +805,55 @@ email_password_entry.pack(fill=tk.X, ipady=6, pady=(0, 10))
 tk.Label(email_input_frame, text="Email Subject:", font=FONT_TEXT, bg=CARD_BG, fg=FG_PRIMARY).pack(anchor=tk.W, pady=(0, 3))
 email_subject_entry = tk.Entry(email_input_frame, bg=HOVER_BG, fg=FG_PRIMARY, font=FONT_TEXT, relief=tk.FLAT, bd=0, insertbackground=ACCENT_GREEN)
 email_subject_entry.pack(fill=tk.X, ipady=6, pady=(0, 15))
+
+# ===== SECTION 0.6: SMS CONFIGURATION (Hidden by default) =====
+sms_config_section = tk.Frame(content_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
+
+sms_config_section.bind("<Enter>", lambda e: on_section_enter(e, sms_config_section))
+sms_config_section.bind("<Leave>", lambda e: on_section_leave(e, sms_config_section))
+
+s_sms_header = tk.Frame(sms_config_section, bg=CARD_BG)
+s_sms_header.pack(fill=tk.X, padx=20, pady=(15, 10))
+tk.Label(s_sms_header, text="📱", font=("Arial", 18), bg=CARD_BG, fg=ACCENT_GREEN).pack(side=tk.LEFT, padx=(0, 10))
+tk.Label(s_sms_header, text="Android Phone via USB", font=FONT_LABEL, bg=CARD_BG, fg=FG_PRIMARY).pack(side=tk.LEFT)
+tk.Label(s_sms_header, text="Connect your Android phone with USB Debugging enabled", font=("Consolas", 8), bg=CARD_BG, fg=FG_SECONDARY).pack(anchor=tk.W, pady=(5, 0))
+
+sms_input_frame = tk.Frame(sms_config_section, bg=CARD_BG)
+sms_input_frame.pack(fill=tk.X, padx=20, pady=(10, 5))
+
+# Device connection test button
+def test_phone_connection():
+    """Test Android phone connection via ADB"""
+    log("📱 Testing Android phone connection...")
+    device = detect_android_device(log)
+    if device:
+        log("✅ Phone connection test PASSED!")
+        log("💡 You can now send SMS messages.")
+    else:
+        log("❌ Phone connection test FAILED!")
+        log("💡 See SMS_SETUP_GUIDE.md for troubleshooting.")
+
+test_phone_btn = tk.Button(sms_input_frame, text="🔌 TEST PHONE CONNECTION", command=test_phone_connection, 
+                           bg=ACCENT_MAIN, fg="#FFFFFF", font=("Consolas", 9, "bold"), 
+                           relief=tk.FLAT, bd=0, padx=20, pady=8, cursor="hand2")
+test_phone_btn.pack(fill=tk.X, pady=(0, 10))
+
+def on_test_phone_enter(event):
+    test_phone_btn.config(bg="#4A8DD6")
+
+def on_test_phone_leave(event):
+    test_phone_btn.config(bg=ACCENT_MAIN)
+
+test_phone_btn.bind("<Enter>", on_test_phone_enter)
+test_phone_btn.bind("<Leave>", on_test_phone_leave)
+
+# SMS Setup instructions
+sms_info_label = tk.Label(sms_input_frame, 
+                          text="🤖 Auto-click ENABLED: App will try to click send button automatically!\n" + 
+                               "💡 Enable USB Debugging: Settings → Developer Options → USB Debugging\n" +
+                               "📚 Full setup guide: SMS_SETUP_GUIDE.md",
+                          font=("Consolas", 8), bg=CARD_BG, fg=ACCENT_GREEN, justify=tk.LEFT)
+sms_info_label.pack(anchor=tk.W, pady=(5, 10))
 
 # ===== SECTION 1: CSV FILE INPUT =====
 section1 = tk.Frame(content_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
@@ -931,6 +1206,17 @@ def start_sending():
             if not email_subject:
                 email_subject = "Message from growHigh"
         
+        # Detect Android device if using SMS platform
+        android_device = None
+        if platform == "SMS":
+            log("📱 Detecting Android device...")
+            android_device = detect_android_device(log)
+            if not android_device:
+                messagebox.showerror("No Phone Detected", "Cannot detect Android phone. Please connect phone and enable USB Debugging.")
+                start_btn.config(state=tk.NORMAL)
+                return
+            log("✅ Android device ready for SMS sending")
+        
         try:
             df = pd.read_csv(csv_path)
         except Exception as e:
@@ -1003,7 +1289,7 @@ def start_sending():
                     rows.append((email_raw, personalized_msg, name))
         
         else:
-            # WhatsApp mode: look for phone column
+            # WhatsApp/SMS mode: look for phone column
             phone_col = None
             name_col = None
             
@@ -1128,6 +1414,33 @@ def start_sending():
                 except Exception as e:
                     log(f"  ❌ ERROR {target_email}: {e}")
                     failed_list.append(target_email)
+                    stats_failed.config(text=str(len(failed_list)))
+                
+                if stop_event.is_set():
+                    break
+        
+        elif platform == "SMS":
+            # SMS sending loop
+            for i, row_data in enumerate(rows, start=1):
+                if stop_event.is_set():
+                    log("⏹ Stopped by user.")
+                    break
+                
+                target_phone, msg, name = row_data
+                log(f"[{i}/{len(rows)}] → {target_phone} ({name})")
+                stats_pending.config(text=str(len(rows) - i))
+                
+                try:
+                    ok = send_message_sms(android_device, target_phone, msg, log, stop_event, delay_seconds)
+                    if ok:
+                        sent_count += 1
+                        stats_sent.config(text=str(sent_count))
+                    else:
+                        failed_list.append(target_phone)
+                        stats_failed.config(text=str(len(failed_list)))
+                except Exception as e:
+                    log(f"  ❌ ERROR {target_phone}: {e}")
+                    failed_list.append(target_phone)
                     stats_failed.config(text=str(len(failed_list)))
                 
                 if stop_event.is_set():
