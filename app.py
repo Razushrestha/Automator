@@ -258,44 +258,66 @@ def send_message_whatsapp(driver, phone, message, log_fn, stop_event, attachment
                     time.sleep(3)  # Wait for message to send
                     log_fn(f"✅ WhatsApp message with attachment sent to {phone}")
                 
+                # Successfully sent attachment, return now
+                return True
+                
             except Exception as e:
-                log_fn(f"  ❌ Attachment failed, sending text only: {e}")
-                # Fallback: send text without attachment
+                log_fn(f"  ❌ Attachment failed: {e}")
+                # If message exists, try sending text only
+                if message and message.strip():
+                    log_fn(f"  📝 Fallback: Sending text only...")
+                    try:
+                        input_box = wait.until(
+                            EC.element_to_be_clickable((By.XPATH, '//div[@contenteditable="true"][@data-tab="10"]'))
+                        )
+                        input_box.click()
+                        time.sleep(0.3)
+                        lines = message.split('\n')
+                        for i, line in enumerate(lines):
+                            if line.strip():
+                                input_box.send_keys(line)
+                            if i < len(lines) - 1:
+                                input_box.send_keys(Keys.SHIFT + Keys.ENTER)
+                        time.sleep(0.5)
+                        input_box.send_keys(Keys.ENTER)
+                        log_fn(f"✅ WhatsApp text message sent to {phone} (attachment failed)")
+                        return True
+                    except Exception as text_err:
+                        log_fn(f"  ❌ Text fallback also failed: {text_err}")
+                        return False
+                else:
+                    # No message and attachment failed
+                    log_fn(f"  ❌ Attachment failed and no text to send")
+                    return False
+        
+        # No attachment - send text only (if message exists)
+        if message and message.strip():
+            try:
                 input_box = wait.until(
                     EC.element_to_be_clickable((By.XPATH, '//div[@contenteditable="true"][@data-tab="10"]'))
                 )
                 input_box.click()
                 time.sleep(0.3)
+                
+                # Split message by lines and send with proper formatting
                 lines = message.split('\n')
                 for i, line in enumerate(lines):
-                    if line.strip():
+                    if line.strip():  # Only send non-empty lines
                         input_box.send_keys(line)
+                    # Add line break except for the last line
                     if i < len(lines) - 1:
                         input_box.send_keys(Keys.SHIFT + Keys.ENTER)
+                
                 time.sleep(0.5)
                 input_box.send_keys(Keys.ENTER)
-                log_fn(f"✅ WhatsApp text message sent to {phone} (attachment failed)")
-        else:
-            # No attachment - send text only
-            if not message or not message.strip():
-                log_fn(f"❌ No message to send for {phone}")
+                log_fn(f"✅ WhatsApp message sent to {phone}")
+            except Exception as e:
+                log_fn(f"❌ Failed to send text message: {e}")
                 return False
-            
-            input_box.click()
-            time.sleep(0.3)
-            
-            # Split message by lines and send with proper formatting
-            lines = message.split('\n')
-            for i, line in enumerate(lines):
-                if line.strip():  # Only send non-empty lines
-                    input_box.send_keys(line)
-                # Add line break except for the last line
-                if i < len(lines) - 1:
-                    input_box.send_keys(Keys.SHIFT + Keys.ENTER)
-            
-            time.sleep(0.5)
-            input_box.send_keys(Keys.ENTER)
-            log_fn(f"✅ WhatsApp message sent to {phone}")
+        else:
+            # No message and no attachment
+            log_fn(f"⚠️ No message or attachment to send for {phone}")
+            return False
         
         # Countdown delay to prevent account flagging (using user-configured delay)
         for remaining in range(delay_seconds, 0, -1):
@@ -620,33 +642,167 @@ def send_message_sms(device, phone, message, log_fn, stop_event, delay_seconds=5
         log_fn(f"❌ Failed to send SMS to {phone}: {e}")
         return False
 
+# --- Messenger sending via Selenium ---
+def send_message_messenger(driver, username, message, log_fn, stop_event, attachment_path=None):
+    """
+    Send a Facebook Messenger message to a single username with optional attachment.
+    
+    Args:
+        driver: Selenium WebDriver instance
+        username: str, Facebook username or profile ID
+        message: str, text message to send
+        log_fn: callable, logging function
+        stop_event: threading.Event, used to stop execution gracefully
+        attachment_path: str, optional path to file to attach
+    
+    Returns:
+        bool, True if sent successfully, False otherwise
+    """
+    if stop_event.is_set():
+        log_fn("Stopped before sending.")
+        return False
+    
+    try:
+        wait = WebDriverWait(driver, WAIT_TIMEOUT)
+        short_wait = WebDriverWait(driver, FAST_WAIT)
+        actions = ActionChains(driver)
+        
+        # Navigate to chat
+        driver.get(f"https://www.messenger.com/t/{username}")
+        
+        # Wait for page to load
+        try:
+            short_wait.until(EC.presence_of_element_located((By.XPATH, "//h1 | //h2 | //div[contains(@class, 'x1lliihq')]")))
+        except Exception:
+            pass
+        
+        # Try clicking "Continue chatting" button if present
+        fast_sels = [
+            "//button[.//span[normalize-space()='Continue chatting']]",
+            "//button[normalize-space()='Continue chatting']",
+            "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'continue chatting')]"
+        ]
+        clicked = False
+        for sel in fast_sels:
+            if stop_event.is_set():
+                return False
+            try:
+                btn = short_wait.until(EC.element_to_be_clickable((By.XPATH, sel)))
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+                time.sleep(0.05)
+                actions.move_to_element(btn).click().perform()
+                clicked = True
+                break
+            except Exception:
+                continue
+        
+        if not clicked:
+            try:
+                fb = short_wait.until(EC.element_to_be_clickable((By.XPATH, "//div[@role='button' and contains(., 'Continue')]")))
+                actions.move_to_element(fb).click().perform()
+            except Exception:
+                pass
+        
+        time.sleep(POST_CLICK_WAIT)
+        
+        # Find message box
+        msg_sels = [
+            "//div[@role='textbox' and @contenteditable='true']",
+            "//div[@aria-label='Message' and @role='textbox']"
+        ]
+        msg_box = None
+        for sel in msg_sels:
+            if stop_event.is_set():
+                return False
+            try:
+                msg_box = short_wait.until(EC.element_to_be_clickable((By.XPATH, sel)))
+                break
+            except Exception:
+                continue
+        
+        if not msg_box:
+            log_fn(f"  ❌ No message box for {username}")
+            return False
+        
+        # Messenger doesn't support attachments via automation - text only
+        if attachment_path and os.path.exists(attachment_path):
+            log_fn(f"  ⚠️ Attachments not supported for Messenger platform")
+            log_fn(f"  📝 Sending text message only...")
+        
+        # Send text message
+        try:
+            msg_box.click()
+            time.sleep(0.15)
+            actions.move_to_element(msg_box).click().key_down("\ue009").send_keys("a").key_up("\ue009").send_keys("\b").perform()
+        except Exception:
+            pass
+        
+        # Send message with proper line break handling (like WhatsApp)
+        try:
+            msg_box.click()
+            time.sleep(0.3)
+            
+            # Split message by lines and send with proper formatting
+            lines = message.split('\n')
+            for i, line in enumerate(lines):
+                if line.strip():  # Only send non-empty lines
+                    msg_box.send_keys(line)
+                # Add line break except for the last line
+                if i < len(lines) - 1:
+                    msg_box.send_keys(Keys.SHIFT + Keys.ENTER)
+            
+            time.sleep(0.5)
+            msg_box.send_keys(Keys.ENTER)
+            log_fn(f"✅ Messenger message sent to {username}")
+            return True
+        except Exception as e:
+            log_fn(f"  ❌ Send failed {username}: {e}")
+            return False
+    
+    except Exception as e:
+        log_fn(f"❌ Failed to send Messenger message to {username}: {e}")
+        return False
+
 # --- Global UI Components Storage ---
 attachment_entry = None
 email_config_section = None
 sms_config_section = None
+messenger_config_section = None
 platform_var = None
 
 def update_ui_for_platform():
     """Show/hide UI elements based on selected platform"""
-    global email_config_section, sms_config_section
+    global email_config_section, sms_config_section, messenger_config_section
     platform = platform_var.get()
     
     if platform == "Email":
         email_config_section.pack(fill=tk.X, pady=12, after=section_platform)
         if sms_config_section:
             sms_config_section.pack_forget()
+        if messenger_config_section:
+            messenger_config_section.pack_forget()
     elif platform == "SMS":
         if sms_config_section:
             sms_config_section.pack(fill=tk.X, pady=12, after=section_platform)
         email_config_section.pack_forget()
+        if messenger_config_section:
+            messenger_config_section.pack_forget()
+    elif platform == "Messenger":
+        if messenger_config_section:
+            messenger_config_section.pack(fill=tk.X, pady=12, after=section_platform)
+        email_config_section.pack_forget()
+        if sms_config_section:
+            sms_config_section.pack_forget()
     else:
         email_config_section.pack_forget()
         if sms_config_section:
             sms_config_section.pack_forget()
+        if messenger_config_section:
+            messenger_config_section.pack_forget()
 
 # ================= MODERN REACTIVE GUI =================
 root = tk.Tk()
-root.title("🚀 growHigh - Bulk Sender (WhatsApp | Email | SMS)")
+root.title("🚀 growHigh - Bulk Sender (WhatsApp | Email | SMS | Messenger)")
 root.geometry("1000x950")
 root.resizable(True, True)
 root.minsize(800, 750)
@@ -689,7 +845,7 @@ header_content.pack(fill=tk.BOTH, expand=True, padx=30, pady=15)
 
 title = tk.Label(header_content, text="🚀 growHigh", font=FONT_TITLE, bg=BG_SECONDARY, fg=ACCENT_GREEN)
 title.pack(anchor=tk.W)
-subtitle = tk.Label(header_content, text="Professional Bulk Sender - WhatsApp & Email with Attachments", font=FONT_SUBTITLE, bg=BG_SECONDARY, fg=FG_SECONDARY)
+subtitle = tk.Label(header_content, text="Professional Bulk Sender - WhatsApp, Email, SMS & Messenger", font=FONT_SUBTITLE, bg=BG_SECONDARY, fg=FG_SECONDARY)
 subtitle.pack(anchor=tk.W, pady=(3, 0))
 
 # Separator line
@@ -768,7 +924,7 @@ def on_platform_change(*args):
 
 platform_var.trace('w', on_platform_change)
 
-platforms = ["WhatsApp", "Email", "SMS"]
+platforms = ["WhatsApp", "Email", "SMS", "Messenger"]
 for platform in platforms:
     platform_rb = tk.Radiobutton(
         platform_frame, text=f"  {platform}",
@@ -854,6 +1010,55 @@ sms_info_label = tk.Label(sms_input_frame,
                                "📚 Full setup guide: SMS_SETUP_GUIDE.md",
                           font=("Consolas", 8), bg=CARD_BG, fg=ACCENT_GREEN, justify=tk.LEFT)
 sms_info_label.pack(anchor=tk.W, pady=(5, 10))
+
+# ===== SECTION 0.7: MESSENGER CONFIGURATION (Hidden by default) =====
+messenger_config_section = tk.Frame(content_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
+
+messenger_config_section.bind("<Enter>", lambda e: on_section_enter(e, messenger_config_section))
+messenger_config_section.bind("<Leave>", lambda e: on_section_leave(e, messenger_config_section))
+
+s_messenger_header = tk.Frame(messenger_config_section, bg=CARD_BG)
+s_messenger_header.pack(fill=tk.X, padx=20, pady=(15, 10))
+tk.Label(s_messenger_header, text="💬", font=("Arial", 18), bg=CARD_BG, fg=ACCENT_GREEN).pack(side=tk.LEFT, padx=(0, 10))
+tk.Label(s_messenger_header, text="Facebook Messenger", font=FONT_LABEL, bg=CARD_BG, fg=FG_PRIMARY).pack(side=tk.LEFT)
+tk.Label(s_messenger_header, text="Login to Facebook Messenger in the browser window", font=("Consolas", 8), bg=CARD_BG, fg=FG_SECONDARY).pack(anchor=tk.W, pady=(5, 0))
+
+messenger_input_frame = tk.Frame(messenger_config_section, bg=CARD_BG)
+messenger_input_frame.pack(fill=tk.X, padx=20, pady=(10, 5))
+
+# Messenger login test button
+def test_messenger_login():
+    """Test Messenger login by opening browser"""
+    log("📱 Opening Messenger for login test...")
+    try:
+        driver = create_driver()
+        driver.get("https://www.messenger.com")
+        log("✅ Browser opened. Please log in to Facebook Messenger.")
+        log("💡 Keep browser open for sending messages.")
+    except Exception as e:
+        log(f"❌ Failed to open browser: {e}")
+
+test_messenger_btn = tk.Button(messenger_input_frame, text="🔐 TEST MESSENGER LOGIN", command=test_messenger_login, 
+                           bg=ACCENT_MAIN, fg="#FFFFFF", font=("Consolas", 9, "bold"), 
+                           relief=tk.FLAT, bd=0, padx=20, pady=8, cursor="hand2")
+test_messenger_btn.pack(fill=tk.X, pady=(0, 10))
+
+def on_test_messenger_enter(event):
+    test_messenger_btn.config(bg="#4A8DD6")
+
+def on_test_messenger_leave(event):
+    test_messenger_btn.config(bg=ACCENT_MAIN)
+
+test_messenger_btn.bind("<Enter>", on_test_messenger_enter)
+test_messenger_btn.bind("<Leave>", on_test_messenger_leave)
+
+# Messenger Setup instructions
+messenger_info_label = tk.Label(messenger_input_frame, 
+                          text="📋 CSV must have 'username' column (Facebook username or profile ID)\n" + 
+                               "💡 Login to Facebook Messenger when browser opens\n" +
+                               "⚡ Messages will be sent automatically after login",
+                          font=("Consolas", 8), bg=CARD_BG, fg=ACCENT_GREEN, justify=tk.LEFT)
+messenger_info_label.pack(anchor=tk.W, pady=(5, 10))
 
 # ===== SECTION 1: CSV FILE INPUT =====
 section1 = tk.Frame(content_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
@@ -1145,12 +1350,13 @@ def start_sending():
     if not csv_path or not os.path.exists(csv_path):
         messagebox.showerror("CSV not found", f"CSV file not found: {csv_path}")
         return
+    
     message = msg_text.get("1.0", tk.END).strip()
-    if not message:
-        messagebox.showerror("No message", "Please type a message to send.")
-    message = msg_text.get("1.0", tk.END).strip()
-    if not message:
-        messagebox.showerror("No message", "Please type a message to send.")
+    attachment_path = attachment_entry.get().strip() if attachment_entry.get().strip() else None
+    
+    # Check if there's either a message or an attachment
+    if not message and not attachment_path:
+        messagebox.showerror("No content", "Please type a message or attach a file to send.")
         return
 
     stop_event.clear()
@@ -1288,6 +1494,70 @@ def start_sending():
                     personalized_msg = f"Hello {name},\n\n{personalized_msg}"
                     rows.append((email_raw, personalized_msg, name))
         
+        elif platform == "Messenger":
+            # Messenger mode: look for username column
+            username_col = None
+            name_col = None
+            
+            for c in df.columns:
+                if c.lower() in ('username', 'user', 'facebook_username', 'fb_username', 'messenger_username'):
+                    username_col = c
+                    break
+            
+            for c in df.columns:
+                if c.lower() in ('name', 'contact_name', 'fullname', 'full_name', 'customer_name'):
+                    name_col = c
+                    break
+            
+            if username_col:
+                for idx, r in df.iterrows():
+                    # Skip rows outside the specified range
+                    row_number = idx + 1  # Convert 0-based index to 1-based row number
+                    if row_number < row_start or row_number > row_end:
+                        continue
+                    
+                    username_raw = str(r[username_col]).strip()
+                    
+                    if not username_raw or username_raw == 'nan':
+                        log(f"⚠️ Skipping empty username at row {row_number}")
+                        continue
+                    
+                    # Use username as name if no name column, otherwise use name column
+                    name = username_raw
+                    if name_col and not pd.isna(r[name_col]):
+                        name = str(r[name_col]).strip()
+                    
+                    # Personalize message: replace {{name}} with name, add "Hello {username}" prefix
+                    personalized_msg = message.replace("{{name}}", name).replace("{name}", name)
+                    personalized_msg = f"Hello {username_raw},\n\n{personalized_msg}"
+                    rows.append((username_raw, personalized_msg, username_raw))
+            else:
+                # Fallback: use first column as username
+                first_col = df.columns[0]
+                for idx, r in df.iterrows():
+                    # Skip rows outside the specified range
+                    row_number = idx + 1  # Convert 0-based index to 1-based row number
+                    if row_number < row_start or row_number > row_end:
+                        continue
+                    
+                    username_raw = str(r[first_col]).strip()
+                    
+                    if not username_raw or username_raw == 'nan':
+                        log(f"⚠️ Skipping empty username at row {row_number}")
+                        continue
+                    
+                    # Use username as name if no name column, otherwise use second column as name
+                    name = username_raw
+                    if len(df.columns) > 1:
+                        second_col = df.columns[1]
+                        if not pd.isna(r[second_col]):
+                            name = str(r[second_col]).strip()
+                    
+                    # Personalize message: replace {{name}} with name, add "Hello {username}" prefix
+                    personalized_msg = message.replace("{{name}}", name).replace("{name}", name)
+                    personalized_msg = f"Hello {username_raw},\n\n{personalized_msg}"
+                    rows.append((username_raw, personalized_msg, username_raw))
+        
         else:
             # WhatsApp/SMS mode: look for phone column
             phone_col = None
@@ -1323,7 +1593,12 @@ def start_sending():
                         name = str(r[name_col]).strip()
                     
                     if phone_clean:
-                        personalized_msg = f"Hello {name},\n\n{message}"
+                        # If attachment exists but no message, don't add greeting
+                        if attachment_path and (not message or not message.strip()):
+                            personalized_msg = ""  # Empty message, only attachment
+                        else:
+                            # Normal message with greeting
+                            personalized_msg = f"Hello {name},\n\n{message}"
                         rows.append((phone_clean, personalized_msg, name))
                     else:
                         log(f"⚠️ Skipping invalid phone: {phone_raw}")
@@ -1351,13 +1626,23 @@ def start_sending():
                             name = str(r[second_col]).strip()
                     
                     if phone_clean:
-                        personalized_msg = f"Hello {name},\n\n{message}"
+                        # If attachment exists but no message, don't add greeting
+                        if attachment_path and (not message or not message.strip()):
+                            personalized_msg = ""  # Empty message, only attachment
+                        else:
+                            # Normal message with greeting
+                            personalized_msg = f"Hello {name},\n\n{message}"
                         rows.append((phone_clean, personalized_msg, name))
                     else:
                         log(f"⚠️ Skipping invalid phone: {phone_raw}")
 
         if not rows:
-            contact_type = "emails" if platform == "Email" else "phone numbers"
+            if platform == "Email":
+                contact_type = "emails"
+            elif platform == "Messenger":
+                contact_type = "usernames"
+            else:
+                contact_type = "phone numbers"
             log(f"❌ No valid {contact_type} found.")
             start_btn.config(state=tk.NORMAL)
             return
@@ -1372,8 +1657,8 @@ def start_sending():
         if attachment_path:
             log(f"📎 Attachment: {os.path.basename(attachment_path)}")
 
-        # Create driver for WhatsApp
-        if platform == "WhatsApp":
+        # Create driver for WhatsApp or Messenger
+        if platform in ["WhatsApp", "Messenger"]:
             try:
                 driver = create_driver()
             except Exception as e:
@@ -1381,12 +1666,20 @@ def start_sending():
                 start_btn.config(state=tk.NORMAL)
                 return
 
-            # Open WhatsApp Web
-            driver.get("https://web.whatsapp.com")
-            time.sleep(2)
-            if "web.whatsapp.com" in driver.current_url and "qr" in driver.page_source.lower():
-                log("📱 Please scan QR code in WhatsApp Web. Waiting 20s...")
-                time.sleep(20)
+            if platform == "WhatsApp":
+                # Open WhatsApp Web
+                driver.get("https://web.whatsapp.com")
+                time.sleep(2)
+                if "web.whatsapp.com" in driver.current_url and "qr" in driver.page_source.lower():
+                    log("📱 Please scan QR code in WhatsApp Web. Waiting 20s...")
+                    time.sleep(20)
+            elif platform == "Messenger":
+                # Open Messenger
+                driver.get("https://www.messenger.com")
+                time.sleep(2)
+                if "login" in driver.current_url.lower():
+                    log("📱 Please log in to Facebook Messenger. Waiting 20s...")
+                    time.sleep(20)
 
         sent_count = 0
         failed_list = []
@@ -1446,6 +1739,42 @@ def start_sending():
                 if stop_event.is_set():
                     break
         
+        elif platform == "Messenger":
+            # Messenger sending loop
+            for i, row_data in enumerate(rows, start=1):
+                if stop_event.is_set():
+                    log("⏹ Stopped by user.")
+                    break
+                
+                target_username, msg, name = row_data
+                log(f"[{i}/{len(rows)}] → {target_username} ({name})")
+                stats_pending.config(text=str(len(rows) - i))
+                
+                try:
+                    ok = send_message_messenger(driver, target_username, msg, log, stop_event, attachment_path)
+                    if ok:
+                        sent_count += 1
+                        stats_sent.config(text=str(sent_count))
+                    else:
+                        failed_list.append(target_username)
+                        stats_failed.config(text=str(len(failed_list)))
+                except Exception as e:
+                    log(f"  ❌ ERROR {target_username}: {e}")
+                    failed_list.append(target_username)
+                    stats_failed.config(text=str(len(failed_list)))
+                
+                # Short delay between messages
+                delay = random.uniform(MIN_DELAY, MAX_DELAY)
+                for remaining in range(int(delay), 0, -1):
+                    if stop_event.is_set():
+                        break
+                    if remaining <= 3:
+                        log(f"  ⏳ {remaining}s...")
+                    time.sleep(1)
+                
+                if stop_event.is_set():
+                    break
+        
         else:
             # WhatsApp sending loop
             for i, row_data in enumerate(rows, start=1):
@@ -1479,7 +1808,7 @@ def start_sending():
         if failed_list:
             log("📌 Failed contacts: " + ", ".join(failed_list[:5]))
         
-        if platform == "WhatsApp":
+        if platform in ["WhatsApp", "Messenger"]:
             try:
                 driver.quit()
             except Exception:
