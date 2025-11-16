@@ -868,6 +868,372 @@ subtitle.pack(anchor=tk.W, pady=(3, 0))
 sep1 = tk.Frame(root, bg=CARD_BORDER, height=1)
 sep1.pack(fill=tk.X, padx=0)
 
+# ===== CSV COMPARISON TOOL BUTTON (Navigation Bar) =====
+nav_bar = tk.Frame(root, bg=BG_SECONDARY, height=50)
+nav_bar.pack(fill=tk.X)
+nav_bar.pack_propagate(False)
+
+nav_content = tk.Frame(nav_bar, bg=BG_SECONDARY)
+nav_content.pack(pady=10)
+
+def open_csv_compare_tool():
+    """Open CSV comparison tool window"""
+    compare_window = tk.Toplevel(root)
+    compare_window.title("📊 CSV Comparison Tool")
+    compare_window.geometry("750x700")
+    compare_window.configure(bg=BG_PRIMARY)
+    compare_window.resizable(True, True)
+    
+    # Header
+    header = tk.Frame(compare_window, bg=BG_SECONDARY, height=70)
+    header.pack(fill=tk.X, side=tk.TOP)
+    header.pack_propagate(False)
+    
+    header_content = tk.Frame(header, bg=BG_SECONDARY)
+    header_content.pack(pady=15, padx=25)
+    
+    tk.Label(header_content, text="🔄", font=("Arial", 20), bg=BG_SECONDARY, fg=ACCENT_GREEN).pack(side=tk.LEFT, padx=(0, 12))
+    tk.Label(header_content, text="CSV Comparison Tool", font=("Consolas", 16, "bold"), bg=BG_SECONDARY, fg=FG_PRIMARY).pack(side=tk.LEFT)
+    tk.Label(header_content, text="Find unique contacts", font=("Consolas", 9), bg=BG_SECONDARY, fg=FG_SECONDARY).pack(side=tk.LEFT, padx=(15, 0))
+    
+    # Separator
+    tk.Frame(compare_window, bg=CARD_BORDER, height=1).pack(fill=tk.X)
+    
+    # Main content with scroll
+    main_frame = tk.Frame(compare_window, bg=BG_PRIMARY)
+    main_frame.pack(fill=tk.BOTH, expand=True, padx=25, pady=20)
+    
+    # Instructions
+    instructions = tk.Frame(main_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
+    instructions.pack(fill=tk.X, pady=(0, 15))
+    
+    inst_header = tk.Frame(instructions, bg=CARD_BG)
+    inst_header.pack(fill=tk.X, padx=20, pady=(12, 5))
+    tk.Label(inst_header, text="ℹ️", font=("Arial", 16), bg=CARD_BG, fg=ACCENT_YELLOW).pack(side=tk.LEFT, padx=(0, 10))
+    tk.Label(inst_header, text="How It Works", font=("Consolas", 11, "bold"), bg=CARD_BG, fg=FG_PRIMARY).pack(side=tk.LEFT)
+    
+    inst_list = tk.Frame(instructions, bg=CARD_BG)
+    inst_list.pack(fill=tk.X, padx=20, pady=(0, 12))
+    
+    tk.Label(inst_list, text="1️⃣", font=("Arial", 12), bg=CARD_BG, fg=ACCENT_GREEN).grid(row=0, column=0, sticky=tk.W, pady=3)
+    tk.Label(inst_list, text="Select Original CSV (contacts already messaged)", 
+             font=("Consolas", 9), bg=CARD_BG, fg=FG_SECONDARY, anchor=tk.W).grid(row=0, column=1, sticky=tk.W, padx=(10, 0), pady=3)
+    
+    tk.Label(inst_list, text="2️⃣", font=("Arial", 12), bg=CARD_BG, fg=ACCENT_GREEN).grid(row=1, column=0, sticky=tk.W, pady=3)
+    tk.Label(inst_list, text="Select New CSV (full contact list)", 
+             font=("Consolas", 9), bg=CARD_BG, fg=FG_SECONDARY, anchor=tk.W).grid(row=1, column=1, sticky=tk.W, padx=(10, 0), pady=3)
+    
+    tk.Label(inst_list, text="3️⃣", font=("Arial", 12), bg=CARD_BG, fg=ACCENT_GREEN).grid(row=2, column=0, sticky=tk.W, pady=3)
+    tk.Label(inst_list, text="Tool removes duplicates - keeps only unique contacts from File B", 
+             font=("Consolas", 9), bg=CARD_BG, fg=FG_SECONDARY, anchor=tk.W).grid(row=2, column=1, sticky=tk.W, padx=(10, 0), pady=3)
+    
+    tk.Label(inst_list, text="4️⃣", font=("Arial", 12), bg=CARD_BG, fg=ACCENT_GREEN).grid(row=3, column=0, sticky=tk.W, pady=3)
+    tk.Label(inst_list, text="Save unique contacts as new CSV - ready to use!", 
+             font=("Consolas", 9), bg=CARD_BG, fg=FG_SECONDARY, anchor=tk.W).grid(row=3, column=1, sticky=tk.W, padx=(10, 0), pady=3)
+    
+    # File A Selection
+    file_a_section = tk.Frame(main_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
+    file_a_section.pack(fill=tk.X, pady=(0, 12))
+    
+    fa_header = tk.Frame(file_a_section, bg=CARD_BG)
+    fa_header.pack(fill=tk.X, padx=20, pady=(12, 5))
+    tk.Label(fa_header, text="📁", font=("Arial", 14), bg=CARD_BG, fg=ACCENT_MAIN).pack(side=tk.LEFT, padx=(0, 10))
+    tk.Label(fa_header, text="File A - Original CSV (Already Messaged)", font=("Consolas", 10, "bold"), 
+             bg=CARD_BG, fg=FG_PRIMARY).pack(side=tk.LEFT)
+    
+    file_a_frame = tk.Frame(file_a_section, bg=CARD_BG)
+    file_a_frame.pack(fill=tk.X, padx=20, pady=(0, 12))
+    
+    file_a_entry = tk.Entry(file_a_frame, bg=HOVER_BG, fg=FG_PRIMARY, font=FONT_TEXT, relief=tk.FLAT, bd=0, insertbackground=ACCENT_GREEN)
+    file_a_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10), ipady=8)
+    
+    def browse_file_a():
+        path = filedialog.askopenfilename(parent=compare_window, title="Select Original CSV (File A)", filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
+        if path:
+            file_a_entry.delete(0, tk.END)
+            file_a_entry.insert(0, path)
+    
+    browse_a_btn = tk.Button(file_a_frame, text="📂 BROWSE", command=browse_file_a, bg=ACCENT_GREEN, fg="#000000",
+                            font=("Consolas", 9, "bold"), relief=tk.FLAT, bd=0, padx=18, pady=8, cursor="hand2")
+    browse_a_btn.pack(side=tk.LEFT)
+    
+    # File B Selection
+    file_b_section = tk.Frame(main_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
+    file_b_section.pack(fill=tk.X, pady=(0, 12))
+    
+    fb_header = tk.Frame(file_b_section, bg=CARD_BG)
+    fb_header.pack(fill=tk.X, padx=20, pady=(12, 5))
+    tk.Label(fb_header, text="📁", font=("Arial", 14), bg=CARD_BG, fg=ACCENT_MAIN).pack(side=tk.LEFT, padx=(0, 10))
+    tk.Label(fb_header, text="File B - New CSV (Full Contact List)", font=("Consolas", 10, "bold"), 
+             bg=CARD_BG, fg=FG_PRIMARY).pack(side=tk.LEFT)
+    
+    file_b_frame = tk.Frame(file_b_section, bg=CARD_BG)
+    file_b_frame.pack(fill=tk.X, padx=20, pady=(0, 12))
+    
+    file_b_entry = tk.Entry(file_b_frame, bg=HOVER_BG, fg=FG_PRIMARY, font=FONT_TEXT, relief=tk.FLAT, bd=0, insertbackground=ACCENT_GREEN)
+    file_b_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10), ipady=8)
+    
+    def browse_file_b():
+        path = filedialog.askopenfilename(parent=compare_window, title="Select New CSV (File B)", filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
+        if path:
+            file_b_entry.delete(0, tk.END)
+            file_b_entry.insert(0, path)
+    
+    browse_b_btn = tk.Button(file_b_frame, text="📂 BROWSE", command=browse_file_b, bg=ACCENT_GREEN, fg="#000000",
+                            font=("Consolas", 9, "bold"), relief=tk.FLAT, bd=0, padx=18, pady=8, cursor="hand2")
+    browse_b_btn.pack(side=tk.LEFT)
+    
+    # Compare button section (Step 1: Compare files)
+    compare_section = tk.Frame(main_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
+    compare_section.pack(fill=tk.X, pady=(0, 12))
+    
+    compare_info = tk.Frame(compare_section, bg=CARD_BG)
+    compare_info.pack(fill=tk.X, padx=20, pady=(12, 5))
+    
+    tk.Label(compare_info, text="🔄", font=("Arial", 14), bg=CARD_BG, fg=ACCENT_MAIN).pack(side=tk.LEFT, padx=(0, 10))
+    tk.Label(compare_info, text="Compare & Save", font=("Consolas", 10, "bold"), 
+             bg=CARD_BG, fg=FG_PRIMARY).pack(side=tk.LEFT)
+    tk.Label(compare_info, text="Find unique contacts and save to file", font=("Consolas", 8),
+             bg=CARD_BG, fg=FG_SECONDARY).pack(side=tk.LEFT, padx=(10, 0))
+    
+    compare_btn_frame = tk.Frame(compare_section, bg=CARD_BG)
+    compare_btn_frame.pack(fill=tk.X, padx=20, pady=(0, 12))
+    
+    # Results display
+    results_section = tk.Frame(main_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
+    results_section.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
+    
+    res_header = tk.Frame(results_section, bg=CARD_BG)
+    res_header.pack(fill=tk.X, padx=20, pady=(12, 5))
+    tk.Label(res_header, text="📊", font=("Arial", 14), bg=CARD_BG, fg=ACCENT_GREEN).pack(side=tk.LEFT, padx=(0, 10))
+    tk.Label(res_header, text="Comparison Results", font=("Consolas", 10, "bold"), bg=CARD_BG, fg=FG_PRIMARY).pack(side=tk.LEFT)
+    
+    results_text = scrolledtext.ScrolledText(results_section, height=10, font=("Consolas", 9), bg=BG_SECONDARY, fg=ACCENT_GREEN,
+                                            state=tk.DISABLED, relief=tk.FLAT, bd=0, insertbackground=ACCENT_GREEN, padx=12, pady=10)
+    results_text.pack(padx=20, pady=(0, 12), fill=tk.BOTH, expand=True)
+    
+    def log_result(msg):
+        results_text.configure(state=tk.NORMAL)
+        results_text.insert(tk.END, f"{msg}\n")
+        results_text.see(tk.END)
+        results_text.configure(state=tk.DISABLED)
+    
+    # Save button section (Step 2: Save results) - Initially hidden
+    save_section = tk.Frame(main_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
+    
+    save_info = tk.Frame(save_section, bg=CARD_BG)
+    save_info.pack(fill=tk.X, padx=20, pady=(12, 8))
+    
+    tk.Label(save_info, text="💾", font=("Arial", 14), bg=CARD_BG, fg=ACCENT_YELLOW).pack(side=tk.LEFT, padx=(0, 10))
+    tk.Label(save_info, text="Step 2: Save Unique Contacts", font=("Consolas", 10, "bold"), 
+             bg=CARD_BG, fg=FG_PRIMARY).pack(side=tk.LEFT)
+    
+    save_btn_frame = tk.Frame(save_section, bg=CARD_BG)
+    save_btn_frame.pack(fill=tk.X, padx=20, pady=(0, 12))
+    
+    output_entry = tk.Entry(save_btn_frame, bg=HOVER_BG, fg=FG_PRIMARY, font=FONT_TEXT, relief=tk.FLAT, bd=0, insertbackground=ACCENT_GREEN)
+    output_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10), ipady=8)
+    
+    # Global variable to store comparison result
+    comparison_result = {'df_unique': None, 'unique_count': 0}
+    
+    # Compare function (Step 1)
+    def compare_files():
+        file_a = file_a_entry.get().strip()
+        file_b = file_b_entry.get().strip()
+        
+        if not file_a or not os.path.exists(file_a):
+            messagebox.showerror("Error", "Please select Original CSV (File A)")
+            return
+        
+        if not file_b or not os.path.exists(file_b):
+            messagebox.showerror("Error", "Please select New CSV (File B)")
+            return
+        
+        try:
+            results_text.configure(state=tk.NORMAL)
+            results_text.delete(1.0, tk.END)
+            results_text.configure(state=tk.DISABLED)
+            
+            log_result("═" * 60)
+            log_result("🔄 STARTING CSV COMPARISON...")
+            log_result("═" * 60)
+            log_result("")
+            
+            # Read both CSV files
+            df_a = pd.read_csv(file_a)
+            df_b = pd.read_csv(file_b)
+            
+            log_result(f"✅ File A loaded: {len(df_a)} rows")
+            log_result(f"✅ File B loaded: {len(df_b)} rows")
+            log_result("")
+            
+            # Detect platform based on columns
+            platform_detected = None
+            contact_col = None
+            
+            if 'phone' in df_a.columns or 'Phone' in df_a.columns:
+                platform_detected = "WhatsApp/SMS"
+                contact_col = 'phone' if 'phone' in df_a.columns else 'Phone'
+            elif 'email' in df_a.columns or 'Email' in df_a.columns:
+                platform_detected = "Email"
+                contact_col = 'email' if 'email' in df_a.columns else 'Email'
+            elif 'username' in df_a.columns or 'Username' in df_a.columns:
+                platform_detected = "Messenger"
+                contact_col = 'username' if 'username' in df_a.columns else 'Username'
+            else:
+                # Use first column as contact column
+                contact_col = df_a.columns[0]
+                platform_detected = "Unknown"
+                log_result(f"⚠️ No standard column found, using: '{contact_col}'")
+            
+            log_result(f"📱 Platform detected: {platform_detected}")
+            log_result(f"📋 Using column: '{contact_col}'")
+            log_result("")
+            
+            # Extract and normalize contacts from File A
+            if platform_detected == "WhatsApp/SMS":
+                contacts_a = set(df_a[contact_col].astype(str).apply(extract_phone_digits))
+            else:
+                contacts_a = set(df_a[contact_col].astype(str).str.strip().str.lower())
+            
+            contacts_a = {c for c in contacts_a if c and c != 'nan'}
+            log_result(f"🔍 Unique contacts in File A: {len(contacts_a)}")
+            
+            # Find unique contacts in File B (not in File A)
+            unique_rows = []
+            duplicate_count = 0
+            
+            for idx, row in df_b.iterrows():
+                contact = str(row[contact_col])
+                
+                if platform_detected == "WhatsApp/SMS":
+                    normalized = extract_phone_digits(contact)
+                else:
+                    normalized = contact.strip().lower()
+                
+                if normalized and normalized != 'nan':
+                    if normalized not in contacts_a:
+                        unique_rows.append(row)
+                    else:
+                        duplicate_count += 1
+            
+            log_result(f"🔄 Contacts in File B: {len(df_b)}")
+            log_result(f"✅ Unique contacts (NOT in File A): {len(unique_rows)}")
+            log_result(f"♻️  Duplicates (already in File A): {duplicate_count}")
+            log_result("")
+            
+            if not unique_rows:
+                log_result("⚠️  NO UNIQUE CONTACTS FOUND!")
+                log_result("All contacts in File B already exist in File A.")
+                log_result("")
+                messagebox.showinfo("No Unique Contacts", "❌ No unique contacts found!\n\nAll contacts in File B already exist in File A.")
+                return
+            
+            # Ask user where to save
+            output_file = filedialog.asksaveasfilename(
+                parent=compare_window,
+                title="Save Unique Contacts",
+                defaultextension=".csv",
+                initialfile="unique_contacts.csv",
+                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+            )
+            
+            if not output_file:
+                log_result("⚠️ Save cancelled by user")
+                return
+            
+            # Create new DataFrame with unique contacts
+            df_unique = pd.DataFrame(unique_rows)
+            
+            log_result(f"💾 Saving {len(unique_rows)} contacts to file...")
+            
+            # Ensure output directory exists
+            output_dir = os.path.dirname(output_file)
+            if output_dir and not os.path.exists(output_dir):
+                os.makedirs(output_dir, exist_ok=True)
+                log_result(f"📁 Created directory: {output_dir}")
+            
+            # Save to output file
+            df_unique.to_csv(output_file, index=False)
+            
+            # Verify file was saved
+            if os.path.exists(output_file):
+                file_size = os.path.getsize(output_file)
+                log_result(f"✅ File saved successfully! ({file_size} bytes)")
+            else:
+                log_result(f"⚠️ Warning: File save reported success but file not found")
+            
+            log_result("")
+            log_result("═" * 60)
+            log_result("✅ SUCCESS!")
+            log_result("═" * 60)
+            log_result(f"📊 Found {len(unique_rows)} unique contacts")
+            log_result(f"💾 Saved to: {output_file}")
+            log_result("")
+            log_result("✨ File is ready to use in the main app!")
+            log_result("═" * 60)
+            
+            # Auto-load the new file into main CSV entry (if it exists)
+            try:
+                csv_entry.delete(0, tk.END)
+                csv_entry.insert(0, output_file)
+                log(f"✅ Loaded unique contacts CSV: {output_file}")
+            except:
+                pass  # csv_entry or log() not yet defined
+            
+            # Ask if user wants to open the folder
+            response = messagebox.askyesno("✅ Success!", 
+                              f"Found {len(unique_rows)} unique contacts!\n\n" +
+                              f"💾 Saved to:\n{output_file}\n\n" +
+                              f"📤 File has been auto-loaded in the main app.\n\n" +
+                              f"Do you want to open the folder?")
+            
+            if response:
+                # Open folder containing the file
+                import subprocess
+                folder_path = os.path.dirname(output_file)
+                subprocess.Popen(f'explorer /select,"{output_file}"')
+            
+        except Exception as e:
+            log_result("")
+            log_result(f"❌ ERROR: {str(e)}")
+            log_result(f"Full error: {repr(e)}")
+            log_result("")
+            messagebox.showerror("Error", f"Failed to compare CSV files:\n\n{str(e)}")
+    
+    compare_btn = tk.Button(compare_btn_frame, text="🔄  COMPARE & SAVE", command=compare_files, 
+                           bg=ACCENT_MAIN, fg="white", font=("Consolas", 11, "bold"), 
+                           relief=tk.FLAT, bd=0, padx=30, pady=14, cursor="hand2")
+    compare_btn.pack(fill=tk.X)
+    
+    def on_compare_btn_enter(event):
+        compare_btn.config(bg="#4A8DD6")
+    
+    def on_compare_btn_leave(event):
+        compare_btn.config(bg=ACCENT_MAIN)
+    
+    compare_btn.bind("<Enter>", on_compare_btn_enter)
+    compare_btn.bind("<Leave>", on_compare_btn_leave)
+
+csv_compare_btn = tk.Button(nav_content, text="🔄  CSV COMPARE TOOL", command=open_csv_compare_tool,
+                            bg=ACCENT_MAIN, fg="white", font=("Consolas", 10, "bold"),
+                            relief=tk.FLAT, bd=0, padx=25, pady=10, cursor="hand2")
+csv_compare_btn.pack()
+
+def on_nav_compare_enter(event):
+    csv_compare_btn.config(bg="#4A8DD6")
+
+def on_nav_compare_leave(event):
+    csv_compare_btn.config(bg=ACCENT_MAIN)
+
+csv_compare_btn.bind("<Enter>", on_nav_compare_enter)
+csv_compare_btn.bind("<Leave>", on_nav_compare_leave)
+
+# Separator line
+sep2 = tk.Frame(root, bg=CARD_BORDER, height=1)
+sep2.pack(fill=tk.X, padx=0)
+
 # Main scrollable container
 main_container = tk.Frame(root, bg=BG_PRIMARY)
 main_container.pack(fill=tk.BOTH, expand=True)
