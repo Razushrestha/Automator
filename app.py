@@ -152,7 +152,14 @@ def send_message_whatsapp(driver, phone, message, log_fn, stop_event, attachment
                 )
                 file_input.send_keys(os.path.abspath(attachment_path))
                 log_fn(f"  ✅ File uploaded: {os.path.basename(attachment_path)}")
-                time.sleep(4)  # Wait for file to upload and preview to load
+                
+                # Check file extension for video files - they need more time to process
+                file_ext = os.path.splitext(attachment_path)[1].lower()
+                if file_ext in ['.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v']:
+                    log_fn(f"  📹 Video detected - waiting for processing...")
+                    time.sleep(8)  # Videos need more time to process
+                else:
+                    time.sleep(4)  # Images/documents
                 
                 # Add caption if message provided
                 if message and message.strip():
@@ -205,52 +212,61 @@ def send_message_whatsapp(driver, phone, message, log_fn, stop_event, attachment
                 
                 # Wait a bit before sending
                 time.sleep(2)
-                log_fn(f"  🔍 Looking for send button...")
+                log_fn(f"  📤 Sending attachment...")
                 
                 # Try multiple methods to click send button
                 send_clicked = False
                 
-                # Method 1: Try clicking green send button directly
+                # Method 1: Try clicking green send button icon (attachment preview)
                 try:
                     send_btn = driver.find_element(By.XPATH, '//span[@data-icon="send"]')
                     driver.execute_script("arguments[0].scrollIntoView(true);", send_btn)
                     time.sleep(0.5)
                     driver.execute_script("arguments[0].click();", send_btn)
-                    log_fn(f"  ✅ Send clicked (JavaScript on icon)")
+                    log_fn(f"  ✅ Sent via button")
                     send_clicked = True
-                except Exception as e1:
-                    log_fn(f"  ⚠️ Method 1 failed: {str(e1)[:80]}")
+                except:
+                    pass
                 
                 if not send_clicked:
-                    # Method 2: Find button by data-testid or role
+                    # Method 2: Find parent button of send icon
                     try:
-                        send_btn = driver.find_element(By.XPATH, '//button[@data-testid="send" or contains(@aria-label, "Send")]')
-                        send_btn.click()
-                        log_fn(f"  ✅ Send clicked (button element)")
-                        send_clicked = True
-                    except Exception as e2:
-                        log_fn(f"  ⚠️ Method 2 failed: {str(e2)[:80]}")
-                
-                if not send_clicked:
-                    # Method 3: Find send button in footer area
-                    try:
-                        send_btn = driver.find_element(By.XPATH, '//footer//button[contains(@class, "compose")]')
+                        send_btn = driver.find_element(By.XPATH, '//button[.//span[@data-icon="send"]]')
                         driver.execute_script("arguments[0].click();", send_btn)
-                        log_fn(f"  ✅ Send clicked (footer button)")
+                        log_fn(f"  ✅ Sent via button")
                         send_clicked = True
-                    except Exception as e3:
-                        log_fn(f"  ⚠️ Method 3 failed: {str(e3)[:80]}")
+                    except:
+                        pass
                 
                 if not send_clicked:
-                    # Method 4: Press Enter in caption box
-                    log_fn(f"  ⚠️ Trying Enter key...")
+                    # Method 3: Find any button with send aria-label
+                    try:
+                        send_btn = driver.find_element(By.XPATH, '//button[contains(@aria-label, "Send") or contains(@aria-label, "send")]')
+                        send_btn.click()
+                        log_fn(f"  ✅ Sent via button")
+                        send_clicked = True
+                    except:
+                        pass
+                
+                if not send_clicked:
+                    # Method 4: Find button in attachment preview footer
+                    try:
+                        send_btn = driver.find_element(By.XPATH, '//div[contains(@class, "send") or contains(@class, "Send")]//button')
+                        driver.execute_script("arguments[0].click();", send_btn)
+                        log_fn(f"  ✅ Sent via button")
+                        send_clicked = True
+                    except:
+                        pass
+                
+                if not send_clicked:
+                    # Method 5: Press Enter in caption box (most reliable for videos)
                     try:
                         caption_box = driver.find_element(By.XPATH, '//div[@contenteditable="true"]')
                         caption_box.send_keys(Keys.ENTER)
-                        log_fn(f"  ✅ Enter key pressed")
+                        log_fn(f"  ✅ Sent via Enter key")
                         send_clicked = True
-                    except Exception as e4:
-                        log_fn(f"  ⚠️ Method 4 failed: {str(e4)[:80]}")
+                    except Exception as e5:
+                        log_fn(f"  ⚠️ All send methods failed: {str(e5)[:80]}")
                 
                 if not send_clicked:
                     log_fn(f"  ❌ ALL METHODS FAILED - Message not sent!")
