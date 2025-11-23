@@ -24,6 +24,13 @@ from email.mime.base import MIMEBase
 from email import encoders
 import re
 
+# SMS via Android phone
+try:
+    from ppadb.client import Client as AdbClient
+    ADB_AVAILABLE = True
+except ImportError:
+    ADB_AVAILABLE = False
+
 # ==================== CONFIG ====================
 
 PROFILE_DIR = os.path.join(os.getenv("APPDATA"), "AutoMessenger", "chrome_profile")
@@ -145,7 +152,14 @@ def send_message_whatsapp(driver, phone, message, log_fn, stop_event, attachment
                 )
                 file_input.send_keys(os.path.abspath(attachment_path))
                 log_fn(f"  ✅ File uploaded: {os.path.basename(attachment_path)}")
-                time.sleep(4)  # Wait for file to upload and preview to load
+                
+                # Check file extension for video files - they need more time to process
+                file_ext = os.path.splitext(attachment_path)[1].lower()
+                if file_ext in ['.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v']:
+                    log_fn(f"  📹 Video detected - waiting for processing...")
+                    time.sleep(8)  # Videos need more time to process
+                else:
+                    time.sleep(4)  # Images/documents
                 
                 # Add caption if message provided
                 if message and message.strip():
@@ -198,52 +212,61 @@ def send_message_whatsapp(driver, phone, message, log_fn, stop_event, attachment
                 
                 # Wait a bit before sending
                 time.sleep(2)
-                log_fn(f"  🔍 Looking for send button...")
+                log_fn(f"  📤 Sending attachment...")
                 
                 # Try multiple methods to click send button
                 send_clicked = False
                 
-                # Method 1: Try clicking green send button directly
+                # Method 1: Try clicking green send button icon (attachment preview)
                 try:
                     send_btn = driver.find_element(By.XPATH, '//span[@data-icon="send"]')
                     driver.execute_script("arguments[0].scrollIntoView(true);", send_btn)
                     time.sleep(0.5)
                     driver.execute_script("arguments[0].click();", send_btn)
-                    log_fn(f"  ✅ Send clicked (JavaScript on icon)")
+                    log_fn(f"  ✅ Sent via button")
                     send_clicked = True
-                except Exception as e1:
-                    log_fn(f"  ⚠️ Method 1 failed: {str(e1)[:80]}")
+                except:
+                    pass
                 
                 if not send_clicked:
-                    # Method 2: Find button by data-testid or role
+                    # Method 2: Find parent button of send icon
                     try:
-                        send_btn = driver.find_element(By.XPATH, '//button[@data-testid="send" or contains(@aria-label, "Send")]')
-                        send_btn.click()
-                        log_fn(f"  ✅ Send clicked (button element)")
-                        send_clicked = True
-                    except Exception as e2:
-                        log_fn(f"  ⚠️ Method 2 failed: {str(e2)[:80]}")
-                
-                if not send_clicked:
-                    # Method 3: Find send button in footer area
-                    try:
-                        send_btn = driver.find_element(By.XPATH, '//footer//button[contains(@class, "compose")]')
+                        send_btn = driver.find_element(By.XPATH, '//button[.//span[@data-icon="send"]]')
                         driver.execute_script("arguments[0].click();", send_btn)
-                        log_fn(f"  ✅ Send clicked (footer button)")
+                        log_fn(f"  ✅ Sent via button")
                         send_clicked = True
-                    except Exception as e3:
-                        log_fn(f"  ⚠️ Method 3 failed: {str(e3)[:80]}")
+                    except:
+                        pass
                 
                 if not send_clicked:
-                    # Method 4: Press Enter in caption box
-                    log_fn(f"  ⚠️ Trying Enter key...")
+                    # Method 3: Find any button with send aria-label
+                    try:
+                        send_btn = driver.find_element(By.XPATH, '//button[contains(@aria-label, "Send") or contains(@aria-label, "send")]')
+                        send_btn.click()
+                        log_fn(f"  ✅ Sent via button")
+                        send_clicked = True
+                    except:
+                        pass
+                
+                if not send_clicked:
+                    # Method 4: Find button in attachment preview footer
+                    try:
+                        send_btn = driver.find_element(By.XPATH, '//div[contains(@class, "send") or contains(@class, "Send")]//button')
+                        driver.execute_script("arguments[0].click();", send_btn)
+                        log_fn(f"  ✅ Sent via button")
+                        send_clicked = True
+                    except:
+                        pass
+                
+                if not send_clicked:
+                    # Method 5: Press Enter in caption box (most reliable for videos)
                     try:
                         caption_box = driver.find_element(By.XPATH, '//div[@contenteditable="true"]')
                         caption_box.send_keys(Keys.ENTER)
-                        log_fn(f"  ✅ Enter key pressed")
+                        log_fn(f"  ✅ Sent via Enter key")
                         send_clicked = True
-                    except Exception as e4:
-                        log_fn(f"  ⚠️ Method 4 failed: {str(e4)[:80]}")
+                    except Exception as e5:
+                        log_fn(f"  ⚠️ All send methods failed: {str(e5)[:80]}")
                 
                 if not send_clicked:
                     log_fn(f"  ❌ ALL METHODS FAILED - Message not sent!")
@@ -251,44 +274,66 @@ def send_message_whatsapp(driver, phone, message, log_fn, stop_event, attachment
                     time.sleep(3)  # Wait for message to send
                     log_fn(f"✅ WhatsApp message with attachment sent to {phone}")
                 
+                # Successfully sent attachment, return now
+                return True
+                
             except Exception as e:
-                log_fn(f"  ❌ Attachment failed, sending text only: {e}")
-                # Fallback: send text without attachment
+                log_fn(f"  ❌ Attachment failed: {e}")
+                # If message exists, try sending text only
+                if message and message.strip():
+                    log_fn(f"  📝 Fallback: Sending text only...")
+                    try:
+                        input_box = wait.until(
+                            EC.element_to_be_clickable((By.XPATH, '//div[@contenteditable="true"][@data-tab="10"]'))
+                        )
+                        input_box.click()
+                        time.sleep(0.3)
+                        lines = message.split('\n')
+                        for i, line in enumerate(lines):
+                            if line.strip():
+                                input_box.send_keys(line)
+                            if i < len(lines) - 1:
+                                input_box.send_keys(Keys.SHIFT + Keys.ENTER)
+                        time.sleep(0.5)
+                        input_box.send_keys(Keys.ENTER)
+                        log_fn(f"✅ WhatsApp text message sent to {phone} (attachment failed)")
+                        return True
+                    except Exception as text_err:
+                        log_fn(f"  ❌ Text fallback also failed: {text_err}")
+                        return False
+                else:
+                    # No message and attachment failed
+                    log_fn(f"  ❌ Attachment failed and no text to send")
+                    return False
+        
+        # No attachment - send text only (if message exists)
+        if message and message.strip():
+            try:
                 input_box = wait.until(
                     EC.element_to_be_clickable((By.XPATH, '//div[@contenteditable="true"][@data-tab="10"]'))
                 )
                 input_box.click()
                 time.sleep(0.3)
+                
+                # Split message by lines and send with proper formatting
                 lines = message.split('\n')
                 for i, line in enumerate(lines):
-                    if line.strip():
+                    if line.strip():  # Only send non-empty lines
                         input_box.send_keys(line)
+                    # Add line break except for the last line
                     if i < len(lines) - 1:
                         input_box.send_keys(Keys.SHIFT + Keys.ENTER)
+                
                 time.sleep(0.5)
                 input_box.send_keys(Keys.ENTER)
-                log_fn(f"✅ WhatsApp text message sent to {phone} (attachment failed)")
-        else:
-            # No attachment - send text only
-            if not message or not message.strip():
-                log_fn(f"❌ No message to send for {phone}")
+                log_fn(f"✅ WhatsApp message sent to {phone}")
+            except Exception as e:
+                log_fn(f"❌ Failed to send text message: {e}")
                 return False
-            
-            input_box.click()
-            time.sleep(0.3)
-            
-            # Split message by lines and send with proper formatting
-            lines = message.split('\n')
-            for i, line in enumerate(lines):
-                if line.strip():  # Only send non-empty lines
-                    input_box.send_keys(line)
-                # Add line break except for the last line
-                if i < len(lines) - 1:
-                    input_box.send_keys(Keys.SHIFT + Keys.ENTER)
-            
-            time.sleep(0.5)
-            input_box.send_keys(Keys.ENTER)
-            log_fn(f"✅ WhatsApp message sent to {phone}")
+        else:
+            # No message and no attachment
+            log_fn(f"⚠️ No message or attachment to send for {phone}")
+            return False
         
         # Countdown delay to prevent account flagging (using user-configured delay)
         for remaining in range(delay_seconds, 0, -1):
@@ -403,24 +448,377 @@ def send_email_smtp(email_to, subject, body, sender_email, sender_password, log_
         log_fn(f"❌ Failed to send email to {email_to}: {e}")
         return False
 
+# --- SMS sending via Android phone (ADB) ---
+def detect_android_device(log_fn):
+    """
+    Detect connected Android device via ADB.
+    Returns device object if found, None otherwise.
+    """
+    if not ADB_AVAILABLE:
+        log_fn("❌ ADB library not installed. Run: pip install pure-python-adb")
+        return None
+    
+    try:
+        # Connect to ADB server
+        adb = AdbClient(host="127.0.0.1", port=5037)
+        devices = adb.devices()
+        
+        if not devices:
+            log_fn("❌ No Android device detected. Enable USB Debugging and connect phone.")
+            return None
+        
+        device = devices[0]
+        log_fn(f"✅ Android device connected: {device.serial}")
+        return device
+    
+    except Exception as e:
+        log_fn(f"❌ ADB connection error: {e}")
+        log_fn("💡 Make sure ADB server is running. See SMS setup guide.")
+        return None
+
+def send_message_sms(device, phone, message, log_fn, stop_event, delay_seconds=5):
+    """
+    Send an SMS via Android phone using ADB.
+    Opens SMS app with pre-filled message and attempts to click send button automatically.
+    
+    Args:
+        device: ADB device object
+        phone: str, phone number
+        message: str, SMS text (160 chars recommended)
+        log_fn: callable, logging function
+        stop_event: threading.Event, used to stop execution gracefully
+        delay_seconds: int, seconds to wait after sending (default: 5)
+    
+    Returns:
+        bool, True if sent successfully, False otherwise
+    """
+    if stop_event.is_set():
+        log_fn("Stopped before sending SMS.")
+        return False
+    
+    try:
+        # Validate phone number
+        phone = str(phone).strip()
+        if not phone:
+            log_fn("❌ Empty phone number, skipping.")
+            return False
+        
+        # Clean phone number (remove spaces, dashes)
+        phone_clean = extract_phone_digits(phone)
+        
+        # Check message length
+        msg_len = len(message)
+        if msg_len > 160:
+            log_fn(f"⚠️ Message length {msg_len} chars (>160). May split into multiple SMS.")
+        
+        # Escape special characters for shell
+        message_escaped = message.replace('"', '\\"').replace("'", "\\'").replace("$", "\\$").replace("`", "\\`").replace("\\n", " ")
+        phone_escaped = phone_clean.replace('"', '\\"')
+        
+        log_fn(f"📱 Opening SMS for {phone_clean}...")
+        
+        # Open SMS app with pre-filled message
+        cmd = f'am start -a android.intent.action.SENDTO -d sms:{phone_escaped} --es sms_body "{message_escaped}"'
+        
+        # Execute command on Android device
+        result = device.shell(cmd)
+        
+        if "Error" in result or "error" in result.lower():
+            log_fn(f"❌ Failed to open SMS app: {result}")
+            return False
+        
+        # Wait for SMS app to open
+        time.sleep(2.5)
+        
+        log_fn(f"🔍 Attempting to auto-click send button...")
+        
+        # Get screen size for calculating tap positions
+        screen_size = device.shell("wm size")
+        width, height = 1080, 2400  # Default values
+        try:
+            size_match = re.search(r'(\d+)x(\d+)', screen_size)
+            if size_match:
+                width = int(size_match.group(1))
+                height = int(size_match.group(2))
+                log_fn(f"📐 Screen: {width}x{height}")
+        except:
+            pass
+        
+        # Method 0: Try to find send button using UI Automator
+        log_fn("🔍 Method 0: Analyzing UI for send button...")
+        try:
+            # Dump UI hierarchy to find send button
+            device.shell("uiautomator dump /sdcard/window_dump.xml")
+            time.sleep(0.5)
+            ui_dump = device.shell("cat /sdcard/window_dump.xml")
+            
+            # Search for send button patterns in XML
+            send_patterns = [
+                r'text="Send"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
+                r'content-desc="Send"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
+                r'resource-id="[^"]*send[^"]*"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
+                r'class="android.widget.ImageButton"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
+            ]
+            
+            send_button_found = False
+            for pattern in send_patterns:
+                matches = re.findall(pattern, ui_dump, re.IGNORECASE)
+                if matches:
+                    for match in matches:
+                        x1, y1, x2, y2 = int(match[0]), int(match[1]), int(match[2]), int(match[3])
+                        # Calculate center of button
+                        center_x = (x1 + x2) // 2
+                        center_y = (y1 + y2) // 2
+                        
+                        # Tap the center of the button
+                        log_fn(f"🎯 Found send button at ({center_x}, {center_y})")
+                        device.shell(f"input tap {center_x} {center_y}")
+                        time.sleep(0.5)
+                        send_button_found = True
+                        break
+                if send_button_found:
+                    break
+            
+            if send_button_found:
+                log_fn("✅ UI Automator: Send button clicked!")
+            else:
+                log_fn("⚠️ UI Automator: Send button not found in XML")
+        except Exception as e:
+            log_fn(f"⚠️ UI Automator failed: {e}")
+        
+        # Multiple send button click attempts
+        send_clicked = False
+        
+        # Method 1: Try common send button positions (right side of screen, various heights)
+        log_fn("🎯 Method 1: Trying common send button positions...")
+        send_positions = [
+            (int(width * 0.92), int(height * 0.93)),  # Bottom right (most common)
+            (int(width * 0.90), int(height * 0.95)),  # Lower right
+            (int(width * 0.88), int(height * 0.90)),  # Mid-right
+            (int(width * 0.85), int(height * 0.88)),  # Alternative position
+            (int(width * 0.95), int(height * 0.92)),  # Far right
+        ]
+        
+        for x, y in send_positions:
+            device.shell(f"input tap {x} {y}")
+            time.sleep(0.3)
+        
+        # Method 2: Try ENTER key (works in some SMS apps)
+        log_fn("⌨️ Method 2: Trying ENTER key...")
+        device.shell("input keyevent 66")  # KEYCODE_ENTER
+        time.sleep(0.3)
+        
+        # Method 3: Try D-PAD navigation + CENTER key
+        log_fn("🎮 Method 3: Trying D-PAD navigation...")
+        device.shell("input keyevent 22")  # KEYCODE_DPAD_RIGHT
+        time.sleep(0.2)
+        device.shell("input keyevent 23")  # KEYCODE_DPAD_CENTER
+        time.sleep(0.3)
+        
+        # Method 4: Try additional screen regions
+        log_fn("🔄 Method 4: Scanning screen for send button...")
+        additional_positions = [
+            (int(width * 0.80), int(height * 0.92)),  # Center-right bottom
+            (int(width * 0.75), int(height * 0.95)),  # Middle bottom
+            (int(width * 0.70), int(height * 0.93)),  # Left of center bottom
+        ]
+        
+        for x, y in additional_positions:
+            device.shell(f"input tap {x} {y}")
+            time.sleep(0.3)
+        
+        # Method 5: Try swipe gesture (some apps need swipe to send)
+        log_fn("👆 Method 5: Trying swipe gesture...")
+        start_x = int(width * 0.85)
+        start_y = int(height * 0.92)
+        end_x = int(width * 0.95)
+        end_y = int(height * 0.92)
+        device.shell(f"input swipe {start_x} {start_y} {end_x} {end_y} 100")
+        time.sleep(0.3)
+        
+        log_fn(f"✅ Auto-click attempts completed!")
+        log_fn(f"💡 If SMS wasn't sent, manually tap send button in next {delay_seconds} seconds...")
+        
+        # Give user backup time to manually tap if auto-click failed
+        for remaining in range(delay_seconds, 0, -1):
+            if stop_event.is_set():
+                break
+            if remaining <= 3:
+                log_fn(f"  ⏳ {remaining}...")
+            time.sleep(1)
+        
+        # Return to home screen
+        device.shell("input keyevent 3")  # KEYCODE_HOME
+        time.sleep(0.5)
+        
+        log_fn(f"✅ Moving to next contact")
+        return True
+    
+    except Exception as e:
+        log_fn(f"❌ Failed to send SMS to {phone}: {e}")
+        return False
+
+# --- Messenger sending via Selenium ---
+def send_message_messenger(driver, username, message, log_fn, stop_event, attachment_path=None):
+    """
+    Send a Facebook Messenger message to a single username with optional attachment.
+    
+    Args:
+        driver: Selenium WebDriver instance
+        username: str, Facebook username or profile ID
+        message: str, text message to send
+        log_fn: callable, logging function
+        stop_event: threading.Event, used to stop execution gracefully
+        attachment_path: str, optional path to file to attach
+    
+    Returns:
+        bool, True if sent successfully, False otherwise
+    """
+    if stop_event.is_set():
+        log_fn("Stopped before sending.")
+        return False
+    
+    try:
+        wait = WebDriverWait(driver, WAIT_TIMEOUT)
+        short_wait = WebDriverWait(driver, FAST_WAIT)
+        actions = ActionChains(driver)
+        
+        # Navigate to chat
+        driver.get(f"https://www.messenger.com/t/{username}")
+        
+        # Wait for page to load
+        try:
+            short_wait.until(EC.presence_of_element_located((By.XPATH, "//h1 | //h2 | //div[contains(@class, 'x1lliihq')]")))
+        except Exception:
+            pass
+        
+        # Try clicking "Continue chatting" button if present
+        fast_sels = [
+            "//button[.//span[normalize-space()='Continue chatting']]",
+            "//button[normalize-space()='Continue chatting']",
+            "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'continue chatting')]"
+        ]
+        clicked = False
+        for sel in fast_sels:
+            if stop_event.is_set():
+                return False
+            try:
+                btn = short_wait.until(EC.element_to_be_clickable((By.XPATH, sel)))
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+                time.sleep(0.05)
+                actions.move_to_element(btn).click().perform()
+                clicked = True
+                break
+            except Exception:
+                continue
+        
+        if not clicked:
+            try:
+                fb = short_wait.until(EC.element_to_be_clickable((By.XPATH, "//div[@role='button' and contains(., 'Continue')]")))
+                actions.move_to_element(fb).click().perform()
+            except Exception:
+                pass
+        
+        time.sleep(POST_CLICK_WAIT)
+        
+        # Find message box
+        msg_sels = [
+            "//div[@role='textbox' and @contenteditable='true']",
+            "//div[@aria-label='Message' and @role='textbox']"
+        ]
+        msg_box = None
+        for sel in msg_sels:
+            if stop_event.is_set():
+                return False
+            try:
+                msg_box = short_wait.until(EC.element_to_be_clickable((By.XPATH, sel)))
+                break
+            except Exception:
+                continue
+        
+        if not msg_box:
+            log_fn(f"  ❌ No message box for {username}")
+            return False
+        
+        # Messenger doesn't support attachments via automation - text only
+        if attachment_path and os.path.exists(attachment_path):
+            log_fn(f"  ⚠️ Attachments not supported for Messenger platform")
+            log_fn(f"  📝 Sending text message only...")
+        
+        # Send text message
+        try:
+            msg_box.click()
+            time.sleep(0.15)
+            actions.move_to_element(msg_box).click().key_down("\ue009").send_keys("a").key_up("\ue009").send_keys("\b").perform()
+        except Exception:
+            pass
+        
+        # Send message with proper line break handling (like WhatsApp)
+        try:
+            msg_box.click()
+            time.sleep(0.3)
+            
+            # Split message by lines and send with proper formatting
+            lines = message.split('\n')
+            for i, line in enumerate(lines):
+                if line.strip():  # Only send non-empty lines
+                    msg_box.send_keys(line)
+                # Add line break except for the last line
+                if i < len(lines) - 1:
+                    msg_box.send_keys(Keys.SHIFT + Keys.ENTER)
+            
+            time.sleep(0.5)
+            msg_box.send_keys(Keys.ENTER)
+            log_fn(f"✅ Messenger message sent to {username}")
+            return True
+        except Exception as e:
+            log_fn(f"  ❌ Send failed {username}: {e}")
+            return False
+    
+    except Exception as e:
+        log_fn(f"❌ Failed to send Messenger message to {username}: {e}")
+        return False
+
 # --- Global UI Components Storage ---
 attachment_entry = None
 email_config_section = None
+sms_config_section = None
+messenger_config_section = None
 platform_var = None
 
 def update_ui_for_platform():
     """Show/hide UI elements based on selected platform"""
-    global email_config_section
+    global email_config_section, sms_config_section, messenger_config_section
     platform = platform_var.get()
     
     if platform == "Email":
         email_config_section.pack(fill=tk.X, pady=12, after=section_platform)
+        if sms_config_section:
+            sms_config_section.pack_forget()
+        if messenger_config_section:
+            messenger_config_section.pack_forget()
+    elif platform == "SMS":
+        if sms_config_section:
+            sms_config_section.pack(fill=tk.X, pady=12, after=section_platform)
+        email_config_section.pack_forget()
+        if messenger_config_section:
+            messenger_config_section.pack_forget()
+    elif platform == "Messenger":
+        if messenger_config_section:
+            messenger_config_section.pack(fill=tk.X, pady=12, after=section_platform)
+        email_config_section.pack_forget()
+        if sms_config_section:
+            sms_config_section.pack_forget()
     else:
         email_config_section.pack_forget()
+        if sms_config_section:
+            sms_config_section.pack_forget()
+        if messenger_config_section:
+            messenger_config_section.pack_forget()
 
 # ================= MODERN REACTIVE GUI =================
 root = tk.Tk()
-root.title("🚀 growHigh - Bulk Sender (WhatsApp & Email)")
+root.title("🚀 growHigh - Bulk Sender (WhatsApp | Email | SMS | Messenger)")
 root.geometry("1000x950")
 root.resizable(True, True)
 root.minsize(800, 750)
@@ -463,12 +861,378 @@ header_content.pack(fill=tk.BOTH, expand=True, padx=30, pady=15)
 
 title = tk.Label(header_content, text="🚀 growHigh", font=FONT_TITLE, bg=BG_SECONDARY, fg=ACCENT_GREEN)
 title.pack(anchor=tk.W)
-subtitle = tk.Label(header_content, text="Professional Bulk Sender - WhatsApp & Email with Attachments", font=FONT_SUBTITLE, bg=BG_SECONDARY, fg=FG_SECONDARY)
+subtitle = tk.Label(header_content, text="Professional Bulk Sender - WhatsApp, Email, SMS & Messenger", font=FONT_SUBTITLE, bg=BG_SECONDARY, fg=FG_SECONDARY)
 subtitle.pack(anchor=tk.W, pady=(3, 0))
 
 # Separator line
 sep1 = tk.Frame(root, bg=CARD_BORDER, height=1)
 sep1.pack(fill=tk.X, padx=0)
+
+# ===== CSV COMPARISON TOOL BUTTON (Navigation Bar) =====
+nav_bar = tk.Frame(root, bg=BG_SECONDARY, height=50)
+nav_bar.pack(fill=tk.X)
+nav_bar.pack_propagate(False)
+
+nav_content = tk.Frame(nav_bar, bg=BG_SECONDARY)
+nav_content.pack(pady=10)
+
+def open_csv_compare_tool():
+    """Open CSV comparison tool window"""
+    compare_window = tk.Toplevel(root)
+    compare_window.title("📊 CSV Comparison Tool")
+    compare_window.geometry("750x700")
+    compare_window.configure(bg=BG_PRIMARY)
+    compare_window.resizable(True, True)
+    
+    # Header
+    header = tk.Frame(compare_window, bg=BG_SECONDARY, height=70)
+    header.pack(fill=tk.X, side=tk.TOP)
+    header.pack_propagate(False)
+    
+    header_content = tk.Frame(header, bg=BG_SECONDARY)
+    header_content.pack(pady=15, padx=25)
+    
+    tk.Label(header_content, text="🔄", font=("Arial", 20), bg=BG_SECONDARY, fg=ACCENT_GREEN).pack(side=tk.LEFT, padx=(0, 12))
+    tk.Label(header_content, text="CSV Comparison Tool", font=("Consolas", 16, "bold"), bg=BG_SECONDARY, fg=FG_PRIMARY).pack(side=tk.LEFT)
+    tk.Label(header_content, text="Find unique contacts", font=("Consolas", 9), bg=BG_SECONDARY, fg=FG_SECONDARY).pack(side=tk.LEFT, padx=(15, 0))
+    
+    # Separator
+    tk.Frame(compare_window, bg=CARD_BORDER, height=1).pack(fill=tk.X)
+    
+    # Main content with scroll
+    main_frame = tk.Frame(compare_window, bg=BG_PRIMARY)
+    main_frame.pack(fill=tk.BOTH, expand=True, padx=25, pady=20)
+    
+    # Instructions
+    instructions = tk.Frame(main_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
+    instructions.pack(fill=tk.X, pady=(0, 15))
+    
+    inst_header = tk.Frame(instructions, bg=CARD_BG)
+    inst_header.pack(fill=tk.X, padx=20, pady=(12, 5))
+    tk.Label(inst_header, text="ℹ️", font=("Arial", 16), bg=CARD_BG, fg=ACCENT_YELLOW).pack(side=tk.LEFT, padx=(0, 10))
+    tk.Label(inst_header, text="How It Works", font=("Consolas", 11, "bold"), bg=CARD_BG, fg=FG_PRIMARY).pack(side=tk.LEFT)
+    
+    inst_list = tk.Frame(instructions, bg=CARD_BG)
+    inst_list.pack(fill=tk.X, padx=20, pady=(0, 12))
+    
+    tk.Label(inst_list, text="1️⃣", font=("Arial", 12), bg=CARD_BG, fg=ACCENT_GREEN).grid(row=0, column=0, sticky=tk.W, pady=3)
+    tk.Label(inst_list, text="Select Original CSV (contacts already messaged)", 
+             font=("Consolas", 9), bg=CARD_BG, fg=FG_SECONDARY, anchor=tk.W).grid(row=0, column=1, sticky=tk.W, padx=(10, 0), pady=3)
+    
+    tk.Label(inst_list, text="2️⃣", font=("Arial", 12), bg=CARD_BG, fg=ACCENT_GREEN).grid(row=1, column=0, sticky=tk.W, pady=3)
+    tk.Label(inst_list, text="Select New CSV (full contact list)", 
+             font=("Consolas", 9), bg=CARD_BG, fg=FG_SECONDARY, anchor=tk.W).grid(row=1, column=1, sticky=tk.W, padx=(10, 0), pady=3)
+    
+    tk.Label(inst_list, text="3️⃣", font=("Arial", 12), bg=CARD_BG, fg=ACCENT_GREEN).grid(row=2, column=0, sticky=tk.W, pady=3)
+    tk.Label(inst_list, text="Tool removes duplicates - keeps only unique contacts from File B", 
+             font=("Consolas", 9), bg=CARD_BG, fg=FG_SECONDARY, anchor=tk.W).grid(row=2, column=1, sticky=tk.W, padx=(10, 0), pady=3)
+    
+    tk.Label(inst_list, text="4️⃣", font=("Arial", 12), bg=CARD_BG, fg=ACCENT_GREEN).grid(row=3, column=0, sticky=tk.W, pady=3)
+    tk.Label(inst_list, text="Save unique contacts as new CSV - ready to use!", 
+             font=("Consolas", 9), bg=CARD_BG, fg=FG_SECONDARY, anchor=tk.W).grid(row=3, column=1, sticky=tk.W, padx=(10, 0), pady=3)
+    
+    # File A Selection
+    file_a_section = tk.Frame(main_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
+    file_a_section.pack(fill=tk.X, pady=(0, 12))
+    
+    fa_header = tk.Frame(file_a_section, bg=CARD_BG)
+    fa_header.pack(fill=tk.X, padx=20, pady=(12, 5))
+    tk.Label(fa_header, text="📁", font=("Arial", 14), bg=CARD_BG, fg=ACCENT_MAIN).pack(side=tk.LEFT, padx=(0, 10))
+    tk.Label(fa_header, text="File A - Original CSV (Already Messaged)", font=("Consolas", 10, "bold"), 
+             bg=CARD_BG, fg=FG_PRIMARY).pack(side=tk.LEFT)
+    
+    file_a_frame = tk.Frame(file_a_section, bg=CARD_BG)
+    file_a_frame.pack(fill=tk.X, padx=20, pady=(0, 12))
+    
+    file_a_entry = tk.Entry(file_a_frame, bg=HOVER_BG, fg=FG_PRIMARY, font=FONT_TEXT, relief=tk.FLAT, bd=0, insertbackground=ACCENT_GREEN)
+    file_a_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10), ipady=8)
+    
+    def browse_file_a():
+        path = filedialog.askopenfilename(parent=compare_window, title="Select Original CSV (File A)", filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
+        if path:
+            file_a_entry.delete(0, tk.END)
+            file_a_entry.insert(0, path)
+    
+    browse_a_btn = tk.Button(file_a_frame, text="📂 BROWSE", command=browse_file_a, bg=ACCENT_GREEN, fg="#000000",
+                            font=("Consolas", 9, "bold"), relief=tk.FLAT, bd=0, padx=18, pady=8, cursor="hand2")
+    browse_a_btn.pack(side=tk.LEFT)
+    
+    # File B Selection
+    file_b_section = tk.Frame(main_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
+    file_b_section.pack(fill=tk.X, pady=(0, 12))
+    
+    fb_header = tk.Frame(file_b_section, bg=CARD_BG)
+    fb_header.pack(fill=tk.X, padx=20, pady=(12, 5))
+    tk.Label(fb_header, text="📁", font=("Arial", 14), bg=CARD_BG, fg=ACCENT_MAIN).pack(side=tk.LEFT, padx=(0, 10))
+    tk.Label(fb_header, text="File B - New CSV (Full Contact List)", font=("Consolas", 10, "bold"), 
+             bg=CARD_BG, fg=FG_PRIMARY).pack(side=tk.LEFT)
+    
+    file_b_frame = tk.Frame(file_b_section, bg=CARD_BG)
+    file_b_frame.pack(fill=tk.X, padx=20, pady=(0, 12))
+    
+    file_b_entry = tk.Entry(file_b_frame, bg=HOVER_BG, fg=FG_PRIMARY, font=FONT_TEXT, relief=tk.FLAT, bd=0, insertbackground=ACCENT_GREEN)
+    file_b_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10), ipady=8)
+    
+    def browse_file_b():
+        path = filedialog.askopenfilename(parent=compare_window, title="Select New CSV (File B)", filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
+        if path:
+            file_b_entry.delete(0, tk.END)
+            file_b_entry.insert(0, path)
+    
+    browse_b_btn = tk.Button(file_b_frame, text="📂 BROWSE", command=browse_file_b, bg=ACCENT_GREEN, fg="#000000",
+                            font=("Consolas", 9, "bold"), relief=tk.FLAT, bd=0, padx=18, pady=8, cursor="hand2")
+    browse_b_btn.pack(side=tk.LEFT)
+    
+    # Compare button section (Step 1: Compare files)
+    compare_section = tk.Frame(main_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
+    compare_section.pack(fill=tk.X, pady=(0, 12))
+    
+    compare_info = tk.Frame(compare_section, bg=CARD_BG)
+    compare_info.pack(fill=tk.X, padx=20, pady=(12, 5))
+    
+    tk.Label(compare_info, text="🔄", font=("Arial", 14), bg=CARD_BG, fg=ACCENT_MAIN).pack(side=tk.LEFT, padx=(0, 10))
+    tk.Label(compare_info, text="Compare & Save", font=("Consolas", 10, "bold"), 
+             bg=CARD_BG, fg=FG_PRIMARY).pack(side=tk.LEFT)
+    tk.Label(compare_info, text="Find unique contacts and save to file", font=("Consolas", 8),
+             bg=CARD_BG, fg=FG_SECONDARY).pack(side=tk.LEFT, padx=(10, 0))
+    
+    compare_btn_frame = tk.Frame(compare_section, bg=CARD_BG)
+    compare_btn_frame.pack(fill=tk.X, padx=20, pady=(0, 12))
+    
+    # Results display
+    results_section = tk.Frame(main_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
+    results_section.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
+    
+    res_header = tk.Frame(results_section, bg=CARD_BG)
+    res_header.pack(fill=tk.X, padx=20, pady=(12, 5))
+    tk.Label(res_header, text="📊", font=("Arial", 14), bg=CARD_BG, fg=ACCENT_GREEN).pack(side=tk.LEFT, padx=(0, 10))
+    tk.Label(res_header, text="Comparison Results", font=("Consolas", 10, "bold"), bg=CARD_BG, fg=FG_PRIMARY).pack(side=tk.LEFT)
+    
+    results_text = scrolledtext.ScrolledText(results_section, height=10, font=("Consolas", 9), bg=BG_SECONDARY, fg=ACCENT_GREEN,
+                                            state=tk.DISABLED, relief=tk.FLAT, bd=0, insertbackground=ACCENT_GREEN, padx=12, pady=10)
+    results_text.pack(padx=20, pady=(0, 12), fill=tk.BOTH, expand=True)
+    
+    def log_result(msg):
+        results_text.configure(state=tk.NORMAL)
+        results_text.insert(tk.END, f"{msg}\n")
+        results_text.see(tk.END)
+        results_text.configure(state=tk.DISABLED)
+    
+    # Save button section (Step 2: Save results) - Initially hidden
+    save_section = tk.Frame(main_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
+    
+    save_info = tk.Frame(save_section, bg=CARD_BG)
+    save_info.pack(fill=tk.X, padx=20, pady=(12, 8))
+    
+    tk.Label(save_info, text="💾", font=("Arial", 14), bg=CARD_BG, fg=ACCENT_YELLOW).pack(side=tk.LEFT, padx=(0, 10))
+    tk.Label(save_info, text="Step 2: Save Unique Contacts", font=("Consolas", 10, "bold"), 
+             bg=CARD_BG, fg=FG_PRIMARY).pack(side=tk.LEFT)
+    
+    save_btn_frame = tk.Frame(save_section, bg=CARD_BG)
+    save_btn_frame.pack(fill=tk.X, padx=20, pady=(0, 12))
+    
+    output_entry = tk.Entry(save_btn_frame, bg=HOVER_BG, fg=FG_PRIMARY, font=FONT_TEXT, relief=tk.FLAT, bd=0, insertbackground=ACCENT_GREEN)
+    output_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10), ipady=8)
+    
+    # Global variable to store comparison result
+    comparison_result = {'df_unique': None, 'unique_count': 0}
+    
+    # Compare function (Step 1)
+    def compare_files():
+        file_a = file_a_entry.get().strip()
+        file_b = file_b_entry.get().strip()
+        
+        if not file_a or not os.path.exists(file_a):
+            messagebox.showerror("Error", "Please select Original CSV (File A)")
+            return
+        
+        if not file_b or not os.path.exists(file_b):
+            messagebox.showerror("Error", "Please select New CSV (File B)")
+            return
+        
+        try:
+            results_text.configure(state=tk.NORMAL)
+            results_text.delete(1.0, tk.END)
+            results_text.configure(state=tk.DISABLED)
+            
+            log_result("═" * 60)
+            log_result("🔄 STARTING CSV COMPARISON...")
+            log_result("═" * 60)
+            log_result("")
+            
+            # Read both CSV files
+            df_a = pd.read_csv(file_a)
+            df_b = pd.read_csv(file_b)
+            
+            log_result(f"✅ File A loaded: {len(df_a)} rows")
+            log_result(f"✅ File B loaded: {len(df_b)} rows")
+            log_result("")
+            
+            # Detect platform based on columns
+            platform_detected = None
+            contact_col = None
+            
+            if 'phone' in df_a.columns or 'Phone' in df_a.columns:
+                platform_detected = "WhatsApp/SMS"
+                contact_col = 'phone' if 'phone' in df_a.columns else 'Phone'
+            elif 'email' in df_a.columns or 'Email' in df_a.columns:
+                platform_detected = "Email"
+                contact_col = 'email' if 'email' in df_a.columns else 'Email'
+            elif 'username' in df_a.columns or 'Username' in df_a.columns:
+                platform_detected = "Messenger"
+                contact_col = 'username' if 'username' in df_a.columns else 'Username'
+            else:
+                # Use first column as contact column
+                contact_col = df_a.columns[0]
+                platform_detected = "Unknown"
+                log_result(f"⚠️ No standard column found, using: '{contact_col}'")
+            
+            log_result(f"📱 Platform detected: {platform_detected}")
+            log_result(f"📋 Using column: '{contact_col}'")
+            log_result("")
+            
+            # Extract and normalize contacts from File A
+            if platform_detected == "WhatsApp/SMS":
+                contacts_a = set(df_a[contact_col].astype(str).apply(extract_phone_digits))
+            else:
+                contacts_a = set(df_a[contact_col].astype(str).str.strip().str.lower())
+            
+            contacts_a = {c for c in contacts_a if c and c != 'nan'}
+            log_result(f"🔍 Unique contacts in File A: {len(contacts_a)}")
+            
+            # Find unique contacts in File B (not in File A)
+            unique_rows = []
+            duplicate_count = 0
+            
+            for idx, row in df_b.iterrows():
+                contact = str(row[contact_col])
+                
+                if platform_detected == "WhatsApp/SMS":
+                    normalized = extract_phone_digits(contact)
+                else:
+                    normalized = contact.strip().lower()
+                
+                if normalized and normalized != 'nan':
+                    if normalized not in contacts_a:
+                        unique_rows.append(row)
+                    else:
+                        duplicate_count += 1
+            
+            log_result(f"🔄 Contacts in File B: {len(df_b)}")
+            log_result(f"✅ Unique contacts (NOT in File A): {len(unique_rows)}")
+            log_result(f"♻️  Duplicates (already in File A): {duplicate_count}")
+            log_result("")
+            
+            if not unique_rows:
+                log_result("⚠️  NO UNIQUE CONTACTS FOUND!")
+                log_result("All contacts in File B already exist in File A.")
+                log_result("")
+                messagebox.showinfo("No Unique Contacts", "❌ No unique contacts found!\n\nAll contacts in File B already exist in File A.")
+                return
+            
+            # Ask user where to save
+            output_file = filedialog.asksaveasfilename(
+                parent=compare_window,
+                title="Save Unique Contacts",
+                defaultextension=".csv",
+                initialfile="unique_contacts.csv",
+                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+            )
+            
+            if not output_file:
+                log_result("⚠️ Save cancelled by user")
+                return
+            
+            # Create new DataFrame with unique contacts
+            df_unique = pd.DataFrame(unique_rows)
+            
+            log_result(f"💾 Saving {len(unique_rows)} contacts to file...")
+            
+            # Ensure output directory exists
+            output_dir = os.path.dirname(output_file)
+            if output_dir and not os.path.exists(output_dir):
+                os.makedirs(output_dir, exist_ok=True)
+                log_result(f"📁 Created directory: {output_dir}")
+            
+            # Save to output file
+            df_unique.to_csv(output_file, index=False)
+            
+            # Verify file was saved
+            if os.path.exists(output_file):
+                file_size = os.path.getsize(output_file)
+                log_result(f"✅ File saved successfully! ({file_size} bytes)")
+            else:
+                log_result(f"⚠️ Warning: File save reported success but file not found")
+            
+            log_result("")
+            log_result("═" * 60)
+            log_result("✅ SUCCESS!")
+            log_result("═" * 60)
+            log_result(f"📊 Found {len(unique_rows)} unique contacts")
+            log_result(f"💾 Saved to: {output_file}")
+            log_result("")
+            log_result("✨ File is ready to use in the main app!")
+            log_result("═" * 60)
+            
+            # Auto-load the new file into main CSV entry (if it exists)
+            try:
+                csv_entry.delete(0, tk.END)
+                csv_entry.insert(0, output_file)
+                log(f"✅ Loaded unique contacts CSV: {output_file}")
+            except:
+                pass  # csv_entry or log() not yet defined
+            
+            # Ask if user wants to open the folder
+            response = messagebox.askyesno("✅ Success!", 
+                              f"Found {len(unique_rows)} unique contacts!\n\n" +
+                              f"💾 Saved to:\n{output_file}\n\n" +
+                              f"📤 File has been auto-loaded in the main app.\n\n" +
+                              f"Do you want to open the folder?")
+            
+            if response:
+                # Open folder containing the file
+                import subprocess
+                folder_path = os.path.dirname(output_file)
+                subprocess.Popen(f'explorer /select,"{output_file}"')
+            
+        except Exception as e:
+            log_result("")
+            log_result(f"❌ ERROR: {str(e)}")
+            log_result(f"Full error: {repr(e)}")
+            log_result("")
+            messagebox.showerror("Error", f"Failed to compare CSV files:\n\n{str(e)}")
+    
+    compare_btn = tk.Button(compare_btn_frame, text="🔄  COMPARE & SAVE", command=compare_files, 
+                           bg=ACCENT_MAIN, fg="white", font=("Consolas", 11, "bold"), 
+                           relief=tk.FLAT, bd=0, padx=30, pady=14, cursor="hand2")
+    compare_btn.pack(fill=tk.X)
+    
+    def on_compare_btn_enter(event):
+        compare_btn.config(bg="#4A8DD6")
+    
+    def on_compare_btn_leave(event):
+        compare_btn.config(bg=ACCENT_MAIN)
+    
+    compare_btn.bind("<Enter>", on_compare_btn_enter)
+    compare_btn.bind("<Leave>", on_compare_btn_leave)
+
+csv_compare_btn = tk.Button(nav_content, text="🔄  CSV COMPARE TOOL", command=open_csv_compare_tool,
+                            bg=ACCENT_MAIN, fg="white", font=("Consolas", 10, "bold"),
+                            relief=tk.FLAT, bd=0, padx=25, pady=10, cursor="hand2")
+csv_compare_btn.pack()
+
+def on_nav_compare_enter(event):
+    csv_compare_btn.config(bg="#4A8DD6")
+
+def on_nav_compare_leave(event):
+    csv_compare_btn.config(bg=ACCENT_MAIN)
+
+csv_compare_btn.bind("<Enter>", on_nav_compare_enter)
+csv_compare_btn.bind("<Leave>", on_nav_compare_leave)
+
+# Separator line
+sep2 = tk.Frame(root, bg=CARD_BORDER, height=1)
+sep2.pack(fill=tk.X, padx=0)
 
 # Main scrollable container
 main_container = tk.Frame(root, bg=BG_PRIMARY)
@@ -542,7 +1306,7 @@ def on_platform_change(*args):
 
 platform_var.trace('w', on_platform_change)
 
-platforms = ["WhatsApp", "Email"]
+platforms = ["WhatsApp", "Email", "SMS", "Messenger"]
 for platform in platforms:
     platform_rb = tk.Radiobutton(
         platform_frame, text=f"  {platform}",
@@ -579,6 +1343,104 @@ email_password_entry.pack(fill=tk.X, ipady=6, pady=(0, 10))
 tk.Label(email_input_frame, text="Email Subject:", font=FONT_TEXT, bg=CARD_BG, fg=FG_PRIMARY).pack(anchor=tk.W, pady=(0, 3))
 email_subject_entry = tk.Entry(email_input_frame, bg=HOVER_BG, fg=FG_PRIMARY, font=FONT_TEXT, relief=tk.FLAT, bd=0, insertbackground=ACCENT_GREEN)
 email_subject_entry.pack(fill=tk.X, ipady=6, pady=(0, 15))
+
+# ===== SECTION 0.6: SMS CONFIGURATION (Hidden by default) =====
+sms_config_section = tk.Frame(content_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
+
+sms_config_section.bind("<Enter>", lambda e: on_section_enter(e, sms_config_section))
+sms_config_section.bind("<Leave>", lambda e: on_section_leave(e, sms_config_section))
+
+s_sms_header = tk.Frame(sms_config_section, bg=CARD_BG)
+s_sms_header.pack(fill=tk.X, padx=20, pady=(15, 10))
+tk.Label(s_sms_header, text="📱", font=("Arial", 18), bg=CARD_BG, fg=ACCENT_GREEN).pack(side=tk.LEFT, padx=(0, 10))
+tk.Label(s_sms_header, text="Android Phone via USB", font=FONT_LABEL, bg=CARD_BG, fg=FG_PRIMARY).pack(side=tk.LEFT)
+tk.Label(s_sms_header, text="Connect your Android phone with USB Debugging enabled", font=("Consolas", 8), bg=CARD_BG, fg=FG_SECONDARY).pack(anchor=tk.W, pady=(5, 0))
+
+sms_input_frame = tk.Frame(sms_config_section, bg=CARD_BG)
+sms_input_frame.pack(fill=tk.X, padx=20, pady=(10, 5))
+
+# Device connection test button
+def test_phone_connection():
+    """Test Android phone connection via ADB"""
+    log("📱 Testing Android phone connection...")
+    device = detect_android_device(log)
+    if device:
+        log("✅ Phone connection test PASSED!")
+        log("💡 You can now send SMS messages.")
+    else:
+        log("❌ Phone connection test FAILED!")
+        log("💡 See SMS_SETUP_GUIDE.md for troubleshooting.")
+
+test_phone_btn = tk.Button(sms_input_frame, text="🔌 TEST PHONE CONNECTION", command=test_phone_connection, 
+                           bg=ACCENT_MAIN, fg="#FFFFFF", font=("Consolas", 9, "bold"), 
+                           relief=tk.FLAT, bd=0, padx=20, pady=8, cursor="hand2")
+test_phone_btn.pack(fill=tk.X, pady=(0, 10))
+
+def on_test_phone_enter(event):
+    test_phone_btn.config(bg="#4A8DD6")
+
+def on_test_phone_leave(event):
+    test_phone_btn.config(bg=ACCENT_MAIN)
+
+test_phone_btn.bind("<Enter>", on_test_phone_enter)
+test_phone_btn.bind("<Leave>", on_test_phone_leave)
+
+# SMS Setup instructions
+sms_info_label = tk.Label(sms_input_frame, 
+                          text="🤖 Auto-click ENABLED: App will try to click send button automatically!\n" + 
+                               "💡 Enable USB Debugging: Settings → Developer Options → USB Debugging\n" +
+                               "📚 Full setup guide: SMS_SETUP_GUIDE.md",
+                          font=("Consolas", 8), bg=CARD_BG, fg=ACCENT_GREEN, justify=tk.LEFT)
+sms_info_label.pack(anchor=tk.W, pady=(5, 10))
+
+# ===== SECTION 0.7: MESSENGER CONFIGURATION (Hidden by default) =====
+messenger_config_section = tk.Frame(content_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
+
+messenger_config_section.bind("<Enter>", lambda e: on_section_enter(e, messenger_config_section))
+messenger_config_section.bind("<Leave>", lambda e: on_section_leave(e, messenger_config_section))
+
+s_messenger_header = tk.Frame(messenger_config_section, bg=CARD_BG)
+s_messenger_header.pack(fill=tk.X, padx=20, pady=(15, 10))
+tk.Label(s_messenger_header, text="💬", font=("Arial", 18), bg=CARD_BG, fg=ACCENT_GREEN).pack(side=tk.LEFT, padx=(0, 10))
+tk.Label(s_messenger_header, text="Facebook Messenger", font=FONT_LABEL, bg=CARD_BG, fg=FG_PRIMARY).pack(side=tk.LEFT)
+tk.Label(s_messenger_header, text="Login to Facebook Messenger in the browser window", font=("Consolas", 8), bg=CARD_BG, fg=FG_SECONDARY).pack(anchor=tk.W, pady=(5, 0))
+
+messenger_input_frame = tk.Frame(messenger_config_section, bg=CARD_BG)
+messenger_input_frame.pack(fill=tk.X, padx=20, pady=(10, 5))
+
+# Messenger login test button
+def test_messenger_login():
+    """Test Messenger login by opening browser"""
+    log("📱 Opening Messenger for login test...")
+    try:
+        driver = create_driver()
+        driver.get("https://www.messenger.com")
+        log("✅ Browser opened. Please log in to Facebook Messenger.")
+        log("💡 Keep browser open for sending messages.")
+    except Exception as e:
+        log(f"❌ Failed to open browser: {e}")
+
+test_messenger_btn = tk.Button(messenger_input_frame, text="🔐 TEST MESSENGER LOGIN", command=test_messenger_login, 
+                           bg=ACCENT_MAIN, fg="#FFFFFF", font=("Consolas", 9, "bold"), 
+                           relief=tk.FLAT, bd=0, padx=20, pady=8, cursor="hand2")
+test_messenger_btn.pack(fill=tk.X, pady=(0, 10))
+
+def on_test_messenger_enter(event):
+    test_messenger_btn.config(bg="#4A8DD6")
+
+def on_test_messenger_leave(event):
+    test_messenger_btn.config(bg=ACCENT_MAIN)
+
+test_messenger_btn.bind("<Enter>", on_test_messenger_enter)
+test_messenger_btn.bind("<Leave>", on_test_messenger_leave)
+
+# Messenger Setup instructions
+messenger_info_label = tk.Label(messenger_input_frame, 
+                          text="📋 CSV must have 'username' column (Facebook username or profile ID)\n" + 
+                               "💡 Login to Facebook Messenger when browser opens\n" +
+                               "⚡ Messages will be sent automatically after login",
+                          font=("Consolas", 8), bg=CARD_BG, fg=ACCENT_GREEN, justify=tk.LEFT)
+messenger_info_label.pack(anchor=tk.W, pady=(5, 10))
 
 # ===== SECTION 1: CSV FILE INPUT =====
 section1 = tk.Frame(content_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
@@ -870,12 +1732,13 @@ def start_sending():
     if not csv_path or not os.path.exists(csv_path):
         messagebox.showerror("CSV not found", f"CSV file not found: {csv_path}")
         return
+    
     message = msg_text.get("1.0", tk.END).strip()
-    if not message:
-        messagebox.showerror("No message", "Please type a message to send.")
-    message = msg_text.get("1.0", tk.END).strip()
-    if not message:
-        messagebox.showerror("No message", "Please type a message to send.")
+    attachment_path = attachment_entry.get().strip() if attachment_entry.get().strip() else None
+    
+    # Check if there's either a message or an attachment
+    if not message and not attachment_path:
+        messagebox.showerror("No content", "Please type a message or attach a file to send.")
         return
 
     stop_event.clear()
@@ -930,6 +1793,17 @@ def start_sending():
             
             if not email_subject:
                 email_subject = "Message from growHigh"
+        
+        # Detect Android device if using SMS platform
+        android_device = None
+        if platform == "SMS":
+            log("📱 Detecting Android device...")
+            android_device = detect_android_device(log)
+            if not android_device:
+                messagebox.showerror("No Phone Detected", "Cannot detect Android phone. Please connect phone and enable USB Debugging.")
+                start_btn.config(state=tk.NORMAL)
+                return
+            log("✅ Android device ready for SMS sending")
         
         try:
             df = pd.read_csv(csv_path)
@@ -1002,8 +1876,72 @@ def start_sending():
                     personalized_msg = f"Hello {name},\n\n{personalized_msg}"
                     rows.append((email_raw, personalized_msg, name))
         
+        elif platform == "Messenger":
+            # Messenger mode: look for username column
+            username_col = None
+            name_col = None
+            
+            for c in df.columns:
+                if c.lower() in ('username', 'user', 'facebook_username', 'fb_username', 'messenger_username'):
+                    username_col = c
+                    break
+            
+            for c in df.columns:
+                if c.lower() in ('name', 'contact_name', 'fullname', 'full_name', 'customer_name'):
+                    name_col = c
+                    break
+            
+            if username_col:
+                for idx, r in df.iterrows():
+                    # Skip rows outside the specified range
+                    row_number = idx + 1  # Convert 0-based index to 1-based row number
+                    if row_number < row_start or row_number > row_end:
+                        continue
+                    
+                    username_raw = str(r[username_col]).strip()
+                    
+                    if not username_raw or username_raw == 'nan':
+                        log(f"⚠️ Skipping empty username at row {row_number}")
+                        continue
+                    
+                    # Use username as name if no name column, otherwise use name column
+                    name = username_raw
+                    if name_col and not pd.isna(r[name_col]):
+                        name = str(r[name_col]).strip()
+                    
+                    # Personalize message: replace {{name}} with name, add "Hello {username}" prefix
+                    personalized_msg = message.replace("{{name}}", name).replace("{name}", name)
+                    personalized_msg = f"Hello {username_raw},\n\n{personalized_msg}"
+                    rows.append((username_raw, personalized_msg, username_raw))
+            else:
+                # Fallback: use first column as username
+                first_col = df.columns[0]
+                for idx, r in df.iterrows():
+                    # Skip rows outside the specified range
+                    row_number = idx + 1  # Convert 0-based index to 1-based row number
+                    if row_number < row_start or row_number > row_end:
+                        continue
+                    
+                    username_raw = str(r[first_col]).strip()
+                    
+                    if not username_raw or username_raw == 'nan':
+                        log(f"⚠️ Skipping empty username at row {row_number}")
+                        continue
+                    
+                    # Use username as name if no name column, otherwise use second column as name
+                    name = username_raw
+                    if len(df.columns) > 1:
+                        second_col = df.columns[1]
+                        if not pd.isna(r[second_col]):
+                            name = str(r[second_col]).strip()
+                    
+                    # Personalize message: replace {{name}} with name, add "Hello {username}" prefix
+                    personalized_msg = message.replace("{{name}}", name).replace("{name}", name)
+                    personalized_msg = f"Hello {username_raw},\n\n{personalized_msg}"
+                    rows.append((username_raw, personalized_msg, username_raw))
+        
         else:
-            # WhatsApp mode: look for phone column
+            # WhatsApp/SMS mode: look for phone column
             phone_col = None
             name_col = None
             
@@ -1037,7 +1975,12 @@ def start_sending():
                         name = str(r[name_col]).strip()
                     
                     if phone_clean:
-                        personalized_msg = f"Hello {name},\n\n{message}"
+                        # If attachment exists but no message, don't add greeting
+                        if attachment_path and (not message or not message.strip()):
+                            personalized_msg = ""  # Empty message, only attachment
+                        else:
+                            # Normal message with greeting
+                            personalized_msg = f"Hello {name},\n\n{message}"
                         rows.append((phone_clean, personalized_msg, name))
                     else:
                         log(f"⚠️ Skipping invalid phone: {phone_raw}")
@@ -1065,13 +2008,23 @@ def start_sending():
                             name = str(r[second_col]).strip()
                     
                     if phone_clean:
-                        personalized_msg = f"Hello {name},\n\n{message}"
+                        # If attachment exists but no message, don't add greeting
+                        if attachment_path and (not message or not message.strip()):
+                            personalized_msg = ""  # Empty message, only attachment
+                        else:
+                            # Normal message with greeting
+                            personalized_msg = f"Hello {name},\n\n{message}"
                         rows.append((phone_clean, personalized_msg, name))
                     else:
                         log(f"⚠️ Skipping invalid phone: {phone_raw}")
 
         if not rows:
-            contact_type = "emails" if platform == "Email" else "phone numbers"
+            if platform == "Email":
+                contact_type = "emails"
+            elif platform == "Messenger":
+                contact_type = "usernames"
+            else:
+                contact_type = "phone numbers"
             log(f"❌ No valid {contact_type} found.")
             start_btn.config(state=tk.NORMAL)
             return
@@ -1086,8 +2039,8 @@ def start_sending():
         if attachment_path:
             log(f"📎 Attachment: {os.path.basename(attachment_path)}")
 
-        # Create driver for WhatsApp
-        if platform == "WhatsApp":
+        # Create driver for WhatsApp or Messenger
+        if platform in ["WhatsApp", "Messenger"]:
             try:
                 driver = create_driver()
             except Exception as e:
@@ -1095,12 +2048,20 @@ def start_sending():
                 start_btn.config(state=tk.NORMAL)
                 return
 
-            # Open WhatsApp Web
-            driver.get("https://web.whatsapp.com")
-            time.sleep(2)
-            if "web.whatsapp.com" in driver.current_url and "qr" in driver.page_source.lower():
-                log("📱 Please scan QR code in WhatsApp Web. Waiting 20s...")
-                time.sleep(20)
+            if platform == "WhatsApp":
+                # Open WhatsApp Web
+                driver.get("https://web.whatsapp.com")
+                time.sleep(2)
+                if "web.whatsapp.com" in driver.current_url and "qr" in driver.page_source.lower():
+                    log("📱 Please scan QR code in WhatsApp Web. Waiting 20s...")
+                    time.sleep(20)
+            elif platform == "Messenger":
+                # Open Messenger
+                driver.get("https://www.messenger.com")
+                time.sleep(2)
+                if "login" in driver.current_url.lower():
+                    log("📱 Please log in to Facebook Messenger. Waiting 20s...")
+                    time.sleep(20)
 
         sent_count = 0
         failed_list = []
@@ -1129,6 +2090,69 @@ def start_sending():
                     log(f"  ❌ ERROR {target_email}: {e}")
                     failed_list.append(target_email)
                     stats_failed.config(text=str(len(failed_list)))
+                
+                if stop_event.is_set():
+                    break
+        
+        elif platform == "SMS":
+            # SMS sending loop
+            for i, row_data in enumerate(rows, start=1):
+                if stop_event.is_set():
+                    log("⏹ Stopped by user.")
+                    break
+                
+                target_phone, msg, name = row_data
+                log(f"[{i}/{len(rows)}] → {target_phone} ({name})")
+                stats_pending.config(text=str(len(rows) - i))
+                
+                try:
+                    ok = send_message_sms(android_device, target_phone, msg, log, stop_event, delay_seconds)
+                    if ok:
+                        sent_count += 1
+                        stats_sent.config(text=str(sent_count))
+                    else:
+                        failed_list.append(target_phone)
+                        stats_failed.config(text=str(len(failed_list)))
+                except Exception as e:
+                    log(f"  ❌ ERROR {target_phone}: {e}")
+                    failed_list.append(target_phone)
+                    stats_failed.config(text=str(len(failed_list)))
+                
+                if stop_event.is_set():
+                    break
+        
+        elif platform == "Messenger":
+            # Messenger sending loop
+            for i, row_data in enumerate(rows, start=1):
+                if stop_event.is_set():
+                    log("⏹ Stopped by user.")
+                    break
+                
+                target_username, msg, name = row_data
+                log(f"[{i}/{len(rows)}] → {target_username} ({name})")
+                stats_pending.config(text=str(len(rows) - i))
+                
+                try:
+                    ok = send_message_messenger(driver, target_username, msg, log, stop_event, attachment_path)
+                    if ok:
+                        sent_count += 1
+                        stats_sent.config(text=str(sent_count))
+                    else:
+                        failed_list.append(target_username)
+                        stats_failed.config(text=str(len(failed_list)))
+                except Exception as e:
+                    log(f"  ❌ ERROR {target_username}: {e}")
+                    failed_list.append(target_username)
+                    stats_failed.config(text=str(len(failed_list)))
+                
+                # Short delay between messages
+                delay = random.uniform(MIN_DELAY, MAX_DELAY)
+                for remaining in range(int(delay), 0, -1):
+                    if stop_event.is_set():
+                        break
+                    if remaining <= 3:
+                        log(f"  ⏳ {remaining}s...")
+                    time.sleep(1)
                 
                 if stop_event.is_set():
                     break
@@ -1166,7 +2190,7 @@ def start_sending():
         if failed_list:
             log("📌 Failed contacts: " + ", ".join(failed_list[:5]))
         
-        if platform == "WhatsApp":
+        if platform in ["WhatsApp", "Messenger"]:
             try:
                 driver.quit()
             except Exception:
