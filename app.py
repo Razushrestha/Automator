@@ -16,7 +16,7 @@ import os
 import threading
 import urllib.parse
 import tkinter as tk
-from tkinter import filedialog, scrolledtext, messagebox
+from tkinter import filedialog, scrolledtext, messagebox, ttk
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -1642,6 +1642,83 @@ for platform in platforms:
     )
     platform_rb.pack(side=tk.LEFT, padx=10, pady=5)
 
+# Country Code Selector (for WhatsApp/SMS)
+country_code_frame = tk.Frame(platform_frame, bg=CARD_BG)
+country_code_frame.pack(fill=tk.X, pady=(10, 0))
+
+tk.Label(country_code_frame, text="🌍 Country Code:", font=FONT_TEXT, bg=CARD_BG, fg=FG_PRIMARY).pack(side=tk.LEFT, padx=(0, 10))
+
+# Country codes dictionary
+COUNTRY_CODES = {
+    "Nepal (+977)": "+977",
+    "India (+91)": "+91",
+    "USA (+1)": "+1",
+    "UK (+44)": "+44",
+    "Canada (+1)": "+1",
+    "Australia (+61)": "+61",
+    "Germany (+49)": "+49",
+    "France (+33)": "+33",
+    "Japan (+81)": "+81",
+    "China (+86)": "+86",
+    "South Korea (+82)": "+82",
+    "Singapore (+65)": "+65",
+    "UAE (+971)": "+971",
+    "Saudi Arabia (+966)": "+966",
+    "Malaysia (+60)": "+60",
+    "Thailand (+66)": "+66",
+    "Philippines (+63)": "+63",
+    "Indonesia (+62)": "+62",
+    "Pakistan (+92)": "+92",
+    "Bangladesh (+880)": "+880",
+    "Sri Lanka (+94)": "+94",
+    "Mexico (+52)": "+52",
+    "Brazil (+55)": "+55",
+    "Argentina (+54)": "+54",
+    "South Africa (+27)": "+27",
+    "New Zealand (+64)": "+64",
+    "Spain (+34)": "+34",
+    "Italy (+39)": "+39",
+    "Netherlands (+31)": "+31",
+    "Belgium (+32)": "+32",
+    "Switzerland (+41)": "+41",
+    "Austria (+43)": "+43",
+    "Sweden (+46)": "+46",
+    "Norway (+47)": "+47",
+    "Denmark (+45)": "+45",
+    "Poland (+48)": "+48",
+    "Russia (+7)": "+7",
+    "Turkey (+90)": "+90",
+    "Egypt (+20)": "+20",
+    "Nigeria (+234)": "+234",
+    "Kenya (+254)": "+254",
+    "Vietnam (+84)": "+84",
+    "Hong Kong (+852)": "+852",
+}
+
+country_code_var = tk.StringVar(value="Nepal (+977)")
+country_code_dropdown = ttk.Combobox(
+    country_code_frame,
+    textvariable=country_code_var,
+    values=list(COUNTRY_CODES.keys()),
+    state="readonly",
+    font=FONT_TEXT,
+    width=20
+)
+country_code_dropdown.pack(side=tk.LEFT)
+country_code_dropdown.current(0)  # Default to Nepal
+
+# Label to show selected code
+selected_code_label = tk.Label(country_code_frame, text="+977", font=("Consolas", 10, "bold"), bg=CARD_BG, fg=ACCENT_GREEN)
+selected_code_label.pack(side=tk.LEFT, padx=(10, 0))
+
+def on_country_change(event=None):
+    selected_country = country_code_var.get()
+    code = COUNTRY_CODES.get(selected_country, "+977")
+    selected_code_label.config(text=code)
+    log(f"🌍 Country code changed to: {code}")
+
+country_code_dropdown.bind("<<ComboboxSelected>>", on_country_change)
+
 # ===== SECTION 0.5: EMAIL CREDENTIALS (Hidden by default) =====
 email_config_section = tk.Frame(content_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
 
@@ -2436,17 +2513,33 @@ def start_sending():
         
         elif platform == "SMS":
             # SMS sending loop
+            # Get selected country code
+            selected_country = country_code_var.get()
+            country_code = COUNTRY_CODES.get(selected_country, "+977")
+            log(f"🌍 Using country code: {country_code}")
+            
             for i, row_data in enumerate(rows, start=1):
                 if stop_event.is_set():
                     log("⏹ Stopped by user.")
                     break
                 
                 target_phone, msg, name = row_data
-                log(f"[{i}/{len(rows)}] → {target_phone} ({name})")
+                
+                # Add country code if not already present
+                target_phone = str(target_phone).strip()
+                if not target_phone.startswith("+") and not target_phone.startswith("00"):
+                    # Remove leading zeros if present
+                    target_phone = target_phone.lstrip("0")
+                    # Add country code
+                    full_phone = country_code + target_phone
+                else:
+                    full_phone = target_phone
+                
+                log(f"[{i}/{len(rows)}] → {full_phone} ({name})")
                 stats_pending.config(text=str(len(rows) - i))
                 
                 try:
-                    ok = send_message_sms(android_device, target_phone, msg, log, stop_event, delay_seconds)
+                    ok = send_message_sms(android_device, full_phone, msg, log, stop_event, delay_seconds)
                     if ok:
                         sent_count += 1
                         stats_sent.config(text=str(sent_count))
@@ -2499,17 +2592,33 @@ def start_sending():
         
         else:
             # WhatsApp sending loop
+            # Get selected country code
+            selected_country = country_code_var.get()
+            country_code = COUNTRY_CODES.get(selected_country, "+977")
+            log(f"🌍 Using country code: {country_code}")
+            
             for i, row_data in enumerate(rows, start=1):
                 if stop_event.is_set():
                     log("⏹ Stopped by user.")
                     break
                 
                 target_phone, msg, name = row_data
-                log(f"[{i}/{len(rows)}] → {target_phone} ({name})")
+                
+                # Add country code if not already present
+                target_phone = str(target_phone).strip()
+                if not target_phone.startswith("+") and not target_phone.startswith("00"):
+                    # Remove leading zeros if present
+                    target_phone = target_phone.lstrip("0")
+                    # Add country code
+                    full_phone = country_code + target_phone
+                else:
+                    full_phone = target_phone
+                
+                log(f"[{i}/{len(rows)}] → {full_phone} ({name})")
                 stats_pending.config(text=str(len(rows) - i))
                 
                 try:
-                    ok = send_message_whatsapp(driver, target_phone, msg, log, stop_event, attachment_path, delay_seconds)
+                    ok = send_message_whatsapp(driver, full_phone, msg, log, stop_event, attachment_path, delay_seconds)
                     if ok:
                         sent_count += 1
                         stats_sent.config(text=str(sent_count))
