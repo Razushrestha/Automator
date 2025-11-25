@@ -55,9 +55,7 @@ def generate_ai_text(prompt, log_fn):
         ]
 
         # Use a placeholder API key - user needs to get their own from huggingface.co
-        headers = {"Authorization": "Bearer YOUR_HUGGINGFACE_API_KEY_HERE"}
 
-        # Try OpenAI API first if user has provided an API key
         openai_key = ""  # Add your OpenAI API key here for better results (optional)
         # Get your key from: https://platform.openai.com/api-keys
         if openai_key:
