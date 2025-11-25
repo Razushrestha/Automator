@@ -10,7 +10,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 import os
 
 # Configuration
-PROFILE_DIR = os.path.join(os.getenv('APPDATA'), 'AutoMessenger', 'chrome_profile')
+PROFILE_DIR = os.path.join(os.getenv("HOME"), ".AutoMessenger", "chrome_profile")
 HEADLESS = False  # Set to True to run browser in background
 
 
