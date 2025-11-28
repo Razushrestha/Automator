@@ -13,6 +13,10 @@ import pandas as pd
 import time
 import random
 import os
+import sys
+import subprocess
+import shutil
+import time
 import threading
 import urllib.parse
 import tkinter as tk
@@ -23,6 +27,47 @@ from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
 import re
+import datetime
+
+# --- Robust ADB Detection and Installation ---
+def check_and_install_adb():
+    # Step 1: Check if adb is already in PATH
+    if shutil.which("adb"):
+        return "system"
+    # Step 2: Try to install via Winget (internet needed)
+    winget_cmd = [
+        "winget", "install", "--id", "Google.PlatformTools", "-e",
+        "--silent", "--accept-package-agreements", "--accept-source-agreements"
+    ]
+    try:
+        result = subprocess.run(winget_cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode == 0 and shutil.which("adb"):
+            return "system"
+    except Exception:
+        pass
+    # Step 3: Fallback to bundled adb.exe (always works offline)
+    bundled_path = os.path.join(get_base_path(), "resources", "platform-tools", "adb.exe")
+    if os.path.exists(bundled_path):
+        return bundled_path
+    else:
+        messagebox.showerror("ADB Error", "ADB not found!\nPlease connect to the internet and restart, or contact support.")
+        sys.exit(1)
+
+def get_base_path():
+    if getattr(sys, 'frozen', False):
+        return sys._MEIPASS
+    return os.path.dirname(__file__)
+
+# --- Universal ADB Command Wrapper ---
+def adb(*args):
+    global _adb_path
+    if '_adb_path' not in globals():
+        _adb_path = check_and_install_adb()  # Runs only once
+    if _adb_path == "system":
+        cmd = ["adb"] + list(args)
+    else:
+        cmd = [_adb_path] + list(args)
+    return subprocess.run(cmd, capture_output=True, text=True)
 
 # SMS via Android phone
 try:
@@ -779,23 +824,20 @@ def detect_android_device(log_fn):
     Detect connected Android device via ADB.
     Returns device object if found, None otherwise.
     """
-    if not ADB_AVAILABLE:
-        log_fn("❌ ADB library not installed. Run: pip install pure-python-adb")
-        return None
-    
+    # Use universal ADB wrapper
     try:
-        # Connect to ADB server
-        adb = AdbClient(host="127.0.0.1", port=5037)
-        devices = adb.devices()
-        
+        # Start ADB server
+        adb("start-server")
+        # List devices
+        result = adb("devices")
+        lines = result.stdout.strip().splitlines()
+        devices = [line for line in lines if line and not line.startswith("List of devices") and "device" in line]
         if not devices:
             log_fn("❌ No Android device detected. Enable USB Debugging and connect phone.")
             return None
-        
-        device = devices[0]
-        log_fn(f"✅ Android device connected: {device.serial}")
-        return device
-    
+        serial = devices[0].split()[0]
+        log_fn(f"✅ Android device connected: {serial}")
+        return serial
     except Exception as e:
         log_fn(f"❌ ADB connection error: {e}")
         log_fn("💡 Make sure ADB server is running. See SMS setup guide.")
@@ -827,39 +869,24 @@ def send_message_sms(device, phone, message, log_fn, stop_event, delay_seconds=5
         if not phone:
             log_fn("❌ Empty phone number, skipping.")
             return False
-        
-        # Clean phone number (remove spaces, dashes)
         phone_clean = extract_phone_digits(phone)
-        
-        # Check message length
         msg_len = len(message)
         if msg_len > 160:
             log_fn(f"⚠️ Message length {msg_len} chars (>160). May split into multiple SMS.")
-        
-        # Escape special characters for shell
         message_escaped = message.replace('"', '\\"').replace("'", "\\'").replace("$", "\\$").replace("`", "\\`").replace("\\n", " ")
         phone_escaped = phone_clean.replace('"', '\\"')
-        
         log_fn(f"📱 Opening SMS for {phone_clean}...")
-        
         # Open SMS app with pre-filled message
-        cmd = f'am start -a android.intent.action.SENDTO -d sms:{phone_escaped} --es sms_body "{message_escaped}"'
-        
-        # Execute command on Android device
-        result = device.shell(cmd)
-        
-        if "Error" in result or "error" in result.lower():
-            log_fn(f"❌ Failed to open SMS app: {result}")
+        cmd = ["shell", f"am start -a android.intent.action.SENDTO -d sms:{phone_escaped} --es sms_body \"{message_escaped}\""]
+        result = adb(*cmd)
+        if "Error" in result.stdout or "error" in result.stdout.lower():
+            log_fn(f"❌ Failed to open SMS app: {result.stdout}")
             return False
-        
-        # Wait for SMS app to open
         time.sleep(2.5)
-        
         log_fn(f"🔍 Attempting to auto-click send button...")
-        
         # Get screen size for calculating tap positions
-        screen_size = device.shell("wm size")
-        width, height = 1080, 2400  # Default values
+        screen_size = adb("shell", "wm size").stdout
+        width, height = 1080, 2400
         try:
             size_match = re.search(r'(\d+)x(\d+)', screen_size)
             if size_match:
@@ -868,117 +895,53 @@ def send_message_sms(device, phone, message, log_fn, stop_event, delay_seconds=5
                 log_fn(f"📐 Screen: {width}x{height}")
         except:
             pass
-        
-        # Method 0: Try to find send button using UI Automator
-        log_fn("🔍 Method 0: Analyzing UI for send button...")
-        try:
-            # Dump UI hierarchy to find send button
-            device.shell("uiautomator dump /sdcard/window_dump.xml")
-            time.sleep(0.5)
-            ui_dump = device.shell("cat /sdcard/window_dump.xml")
-            
-            # Search for send button patterns in XML
-            send_patterns = [
-                r'text="Send"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
-                r'content-desc="Send"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
-                r'resource-id="[^"]*send[^"]*"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
-                r'class="android.widget.ImageButton"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
-            ]
-            
-            send_button_found = False
-            for pattern in send_patterns:
-                matches = re.findall(pattern, ui_dump, re.IGNORECASE)
-                if matches:
-                    for match in matches:
-                        x1, y1, x2, y2 = int(match[0]), int(match[1]), int(match[2]), int(match[3])
-                        # Calculate center of button
-                        center_x = (x1 + x2) // 2
-                        center_y = (y1 + y2) // 2
-                        
-                        # Tap the center of the button
-                        log_fn(f"🎯 Found send button at ({center_x}, {center_y})")
-                        device.shell(f"input tap {center_x} {center_y}")
-                        time.sleep(0.5)
-                        send_button_found = True
-                        break
-                if send_button_found:
-                    break
-            
-            if send_button_found:
-                log_fn("✅ UI Automator: Send button clicked!")
-            else:
-                log_fn("⚠️ UI Automator: Send button not found in XML")
-        except Exception as e:
-            log_fn(f"⚠️ UI Automator failed: {e}")
-        
-        # Multiple send button click attempts
-        send_clicked = False
-        
-        # Method 1: Try common send button positions (right side of screen, various heights)
-        log_fn("🎯 Method 1: Trying common send button positions...")
+        # Method 1: Try common send button positions
         send_positions = [
-            (int(width * 0.92), int(height * 0.93)),  # Bottom right (most common)
-            (int(width * 0.90), int(height * 0.95)),  # Lower right
-            (int(width * 0.88), int(height * 0.90)),  # Mid-right
-            (int(width * 0.85), int(height * 0.88)),  # Alternative position
-            (int(width * 0.95), int(height * 0.92)),  # Far right
+            (int(width * 0.92), int(height * 0.93)),
+            (int(width * 0.90), int(height * 0.95)),
+            (int(width * 0.88), int(height * 0.90)),
+            (int(width * 0.85), int(height * 0.88)),
+            (int(width * 0.95), int(height * 0.92)),
         ]
-        
         for x, y in send_positions:
-            device.shell(f"input tap {x} {y}")
+            adb("shell", f"input tap {x} {y}")
             time.sleep(0.3)
-        
-        # Method 2: Try ENTER key (works in some SMS apps)
-        log_fn("⌨️ Method 2: Trying ENTER key...")
-        device.shell("input keyevent 66")  # KEYCODE_ENTER
+        # Method 2: Try ENTER key
+        adb("shell", "input keyevent 66")
         time.sleep(0.3)
-        
-        # Method 3: Try D-PAD navigation + CENTER key
-        log_fn("🎮 Method 3: Trying D-PAD navigation...")
-        device.shell("input keyevent 22")  # KEYCODE_DPAD_RIGHT
+        # Method 3: D-PAD navigation + CENTER key
+        adb("shell", "input keyevent 22")
         time.sleep(0.2)
-        device.shell("input keyevent 23")  # KEYCODE_DPAD_CENTER
+        adb("shell", "input keyevent 23")
         time.sleep(0.3)
-        
-        # Method 4: Try additional screen regions
-        log_fn("🔄 Method 4: Scanning screen for send button...")
+        # Method 4: Additional screen regions
         additional_positions = [
-            (int(width * 0.80), int(height * 0.92)),  # Center-right bottom
-            (int(width * 0.75), int(height * 0.95)),  # Middle bottom
-            (int(width * 0.70), int(height * 0.93)),  # Left of center bottom
+            (int(width * 0.80), int(height * 0.92)),
+            (int(width * 0.75), int(height * 0.95)),
+            (int(width * 0.70), int(height * 0.93)),
         ]
-        
         for x, y in additional_positions:
-            device.shell(f"input tap {x} {y}")
+            adb("shell", f"input tap {x} {y}")
             time.sleep(0.3)
-        
-        # Method 5: Try swipe gesture (some apps need swipe to send)
-        log_fn("👆 Method 5: Trying swipe gesture...")
+        # Method 5: Swipe gesture
         start_x = int(width * 0.85)
         start_y = int(height * 0.92)
         end_x = int(width * 0.95)
         end_y = int(height * 0.92)
-        device.shell(f"input swipe {start_x} {start_y} {end_x} {end_y} 100")
+        adb("shell", f"input swipe {start_x} {start_y} {end_x} {end_y} 100")
         time.sleep(0.3)
-        
         log_fn(f"✅ Auto-click attempts completed!")
         log_fn(f"💡 If SMS wasn't sent, manually tap send button in next {delay_seconds} seconds...")
-        
-        # Give user backup time to manually tap if auto-click failed
         for remaining in range(delay_seconds, 0, -1):
             if stop_event.is_set():
                 break
             if remaining <= 3:
                 log_fn(f"  ⏳ {remaining}...")
             time.sleep(1)
-        
-        # Return to home screen
-        device.shell("input keyevent 3")  # KEYCODE_HOME
+        adb("shell", "input keyevent 3")
         time.sleep(0.5)
-        
         log_fn(f"✅ Moving to next contact")
         return True
-    
     except Exception as e:
         log_fn(f"❌ Failed to send SMS to {phone}: {e}")
         return False
@@ -1140,6 +1103,38 @@ def update_ui_for_platform():
             sms_config_section.pack_forget()
         if messenger_config_section:
             messenger_config_section.pack_forget()
+
+# ===============================================
+
+# --- Trial Expiration Check ---
+INSTALL_DATE = datetime.date(2025, 11, 26)
+TRIAL_DAYS = 7
+
+def check_trial_expiration():
+    today = datetime.date.today()
+    
+    days_used = (today - INSTALL_DATE).days
+    
+    if days_used > TRIAL_DAYS:
+        messagebox.showerror(
+            "Trial Expired",
+            f"Your {TRIAL_DAYS}-day trial has expired!\n\n"
+            f"First run / install date: {INSTALL_DATE}\n"
+            f"Days used: {days_used}\n\n"
+            "Contact the developer for the full version."
+        )
+        sys.exit(1)
+    
+    # Optional: friendly reminder when close to expiry
+    if days_used >= 5:
+        remaining = TRIAL_DAYS - days_used
+        messagebox.showwarning(
+            "Trial Almost Over",
+            f"You have only {remaining} day{'s' if remaining != 1 else ''} left!"
+        )
+
+# Put this at the very start of your app
+check_trial_expiration()
 
 # ================= MODERN REACTIVE GUI =================
 root = tk.Tk()

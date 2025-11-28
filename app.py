@@ -13,7 +13,7 @@ import threading
 import re
 import tkinter as tk
 from tkinter import filedialog, scrolledtext, messagebox, ttk
-import requests  # For API calls
+
 
 # Platform-specific sender imports
 from platforms.whatsapp import send_message_whatsapp
@@ -1300,106 +1300,6 @@ row_end_entry = tk.Entry(range_frame, bg=HOVER_BG, fg=FG_PRIMARY, font=FONT_TEXT
 row_end_entry.insert(0, "999999")  # Default to very large number (all rows)
 row_end_entry.pack(side=tk.LEFT, ipady=5)
 tk.Label(range_frame, text="(Leave 'To' as large number for all rows)", font=("Consolas", 8), bg=CARD_BG, fg=FG_SECONDARY).pack(side=tk.LEFT, padx=(10, 0))
-
-# ===== SECTION 1.5: AI TEXT GENERATION =====
-ai_section = tk.Frame(content_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
-ai_section.pack(fill=tk.X, pady=12)
-
-ai_section.bind("<Enter>", lambda e: on_section_enter(e, ai_section))
-ai_section.bind("<Leave>", lambda e: on_section_leave(e, ai_section))
-
-ai_header = tk.Frame(ai_section, bg=CARD_BG)
-ai_header.pack(fill=tk.X, padx=20, pady=(15, 5))
-tk.Label(ai_header, text="🤖", font=("Arial", 18), bg=CARD_BG, fg=ACCENT_GREEN).pack(side=tk.LEFT, padx=(0, 10))
-tk.Label(ai_header, text="AI Text Generator", font=FONT_LABEL, bg=CARD_BG, fg=FG_PRIMARY).pack(side=tk.LEFT)
-tk.Label(ai_header, text="Generate messages using AI (requires free HuggingFace API key)", font=("Consolas", 8), bg=CARD_BG, fg=ACCENT_YELLOW).pack(anchor=tk.W, pady=(5, 0))
-
-# API Key info
-api_info = tk.Frame(ai_section, bg=CARD_BG)
-api_info.pack(fill=tk.X, padx=20, pady=(0, 10))
-tk.Label(api_info, text="🔑", font=("Arial", 12), bg=CARD_BG, fg=ACCENT_YELLOW).pack(side=tk.LEFT, padx=(0, 5))
-tk.Label(api_info, text="Get free API key at: huggingface.co/settings/tokens (replace x's in code)", font=("Consolas", 8), bg=CARD_BG, fg=FG_SECONDARY).pack(side=tk.LEFT)
-
-ai_input_frame = tk.Frame(ai_section, bg=CARD_BG)
-ai_input_frame.pack(fill=tk.X, padx=20, pady=(10, 5))
-
-tk.Label(ai_input_frame, text="Prompt:", font=FONT_TEXT, bg=CARD_BG, fg=FG_PRIMARY).pack(anchor=tk.W, pady=(0, 3))
-ai_prompt_entry = tk.Entry(ai_input_frame, bg=HOVER_BG, fg=FG_PRIMARY, font=FONT_TEXT, relief=tk.FLAT, bd=0, insertbackground=ACCENT_GREEN)
-ai_prompt_entry.pack(fill=tk.X, ipady=6, pady=(0, 10))
-ai_prompt_entry.insert(0, "Write a professional business outreach message for handmade/artisan businesses about our website development services. Include company introduction, services list, portfolio examples, and call to action.")
-
-ai_buttons_frame = tk.Frame(ai_input_frame, bg=CARD_BG)
-ai_buttons_frame.pack(fill=tk.X, pady=(0, 10))
-
-generate_btn = tk.Button(ai_buttons_frame, text="🎯 Generate", bg=ACCENT_BLUE, fg="white",
-                        font=("Consolas", 9, "bold"), relief=tk.FLAT, bd=0, padx=15, pady=6, cursor="hand2")
-generate_btn.pack(side=tk.LEFT, padx=(0, 10))
-
-copy_btn = tk.Button(ai_buttons_frame, text="📋 Copy to Message", bg=ACCENT_YELLOW, fg="#000000",
-                    font=("Consolas", 9, "bold"), relief=tk.FLAT, bd=0, padx=15, pady=6, cursor="hand2")
-copy_btn.pack(side=tk.LEFT)
-
-clear_btn = tk.Button(ai_buttons_frame, text="🗑️ Clear", bg=HOVER_BG, fg=FG_PRIMARY,
-                     font=("Consolas", 9, "bold"), relief=tk.FLAT, bd=0, padx=15, pady=6, cursor="hand2")
-clear_btn.pack(side=tk.LEFT)
-
-ai_output_frame = tk.Frame(ai_section, bg=CARD_BG)
-ai_output_frame.pack(fill=tk.X, padx=20, pady=(5, 15))
-
-tk.Label(ai_output_frame, text="Generated Text:", font=FONT_TEXT, bg=CARD_BG, fg=FG_PRIMARY).pack(anchor=tk.W, pady=(0, 3))
-ai_output_text = tk.Text(ai_output_frame, height=4, width=80, wrap=tk.WORD, bg=HOVER_BG, fg=FG_PRIMARY, font=FONT_TEXT,
-                        relief=tk.FLAT, bd=0, insertbackground=ACCENT_GREEN, padx=8, pady=6)
-ai_output_text.pack(fill=tk.X, expand=True)
-
-# AI Functions
-def generate_ai_text_gui():
-    """Generate AI text and display in GUI"""
-    prompt = ai_prompt_entry.get().strip()
-    if not prompt:
-        messagebox.showwarning("Empty Prompt", "Please enter a prompt to generate text.")
-        return
-
-    # Disable button during generation
-    generate_btn.config(state=tk.DISABLED, text="⏳ Generating...")
-    ai_output_text.delete("1.0", tk.END)
-    ai_output_text.insert("1.0", "Generating AI text... Please wait...")
-
-    def ai_worker():
-        result = generate_ai_text(prompt, log)
-        root.after(0, lambda: update_ai_output(result))
-
-    def update_ai_output(result):
-        ai_output_text.delete("1.0", tk.END)
-        ai_output_text.insert("1.0", result)
-        generate_btn.config(state=tk.NORMAL, text="🎯 Generate")
-
-    threading.Thread(target=ai_worker, daemon=True).start()
-
-def copy_to_message():
-    """Copy generated AI text to message composer"""
-    ai_text = ai_output_text.get("1.0", tk.END).strip()
-    if ai_text and ai_text != "Generating AI text... Please wait...":
-        current_msg = msg_text.get("1.0", tk.END).strip()
-        if current_msg:
-            # Append to existing message
-            msg_text.insert(tk.END, "\n\n" + ai_text)
-        else:
-            # Replace empty message
-            msg_text.insert("1.0", ai_text)
-        log("📋 AI text copied to message composer")
-    else:
-        messagebox.showwarning("No Text", "Please generate AI text first.")
-
-def clear_ai_output():
-    """Clear AI output"""
-    ai_output_text.delete("1.0", tk.END)
-    ai_prompt_entry.delete(0, tk.END)
-    ai_prompt_entry.insert(0, "Write a professional business outreach message for handmade/artisan businesses about our website development services. Include company introduction, services list, portfolio examples, and call to action.")
-
-# Bind AI buttons
-generate_btn.config(command=generate_ai_text_gui)
-copy_btn.config(command=copy_to_message)
-clear_btn.config(command=clear_ai_output)
 
 # ===== SECTION 2: MESSAGE COMPOSER =====
 section2 = tk.Frame(content_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
