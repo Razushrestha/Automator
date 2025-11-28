@@ -42,3 +42,6 @@ pip-wheel-metadata/
 build/
 dist/
 *.egg-info/
+
+
+*.exe
