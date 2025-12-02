@@ -29,6 +29,8 @@ from email import encoders
 import re
 import datetime
 
+import undetected_chromedriver as uc
+
 # --- Robust ADB Detection and Installation ---
 def check_and_install_adb():
     # Step 1: Check if adb is already in PATH
@@ -78,8 +80,9 @@ except ImportError:
 
 # ==================== CONFIG ====================
 
-PROFILE_DIR = os.path.join(os.getenv("APPDATA"), "AutoMessenger", "chrome_profile")
+PROFILE_DIR = os.path.join(os.path.expanduser("~"), ".automessenger", "chrome_profile")
 os.makedirs(PROFILE_DIR, exist_ok=True)
+
 
 HEADLESS = False
 MIN_DELAY = 3
@@ -103,34 +106,30 @@ def extract_phone_digits(phone_str):
     return digits.strip()
 
 # --- Helper: create Chrome driver on demand (so GUI can start first) ---
+
+
 def create_driver(profile_dir=PROFILE_DIR, headless=HEADLESS):
+    # Make sure profile directory exists
     os.makedirs(profile_dir, exist_ok=True)
-    options = Options()
+
+    # Create Chrome options
+    options = uc.ChromeOptions()
     options.add_argument(f"--user-data-dir={profile_dir}")
+
+    # Headless mode (WhatsApp blocks old headless, "new" is ok)
     if headless:
         options.add_argument("--headless=new")
+
+    # Keep everything else as normal as possible
+    # Avoid anti-detection flags like disable-blink-features!
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--disable-infobars")
-    options.add_argument("--disable-extensions")
-    # Note: --disable-images removed - WhatsApp needs images to work properly
-    options.add_argument("--disable-plugins")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option("useAutomationExtension", False)
-    options.add_experimental_option("prefs", {
-        "profile.default_content_setting_values.notifications": 2,
-        "profile.default_content_settings.popups": 0
-    })
-    driver_path = ChromeDriverManager().install()
-    service = Service(driver_path)
-    driver = webdriver.Chrome(service=service, options=options)
-    # hide webdriver flag
-    try:
-        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => false});")
-    except Exception:
-        pass
+
+    # Create real undetected Chrome
+    driver = uc.Chrome(options=options)
+
     return driver
+
 
 # --- Messaging actions (WhatsApp with attachment support) ---
 def send_message_whatsapp(driver, phone, message, log_fn, stop_event, attachment_path=None, delay_seconds=60):
