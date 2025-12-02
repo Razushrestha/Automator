@@ -1,30 +1,77 @@
-"""
-Sendora - Multi-Platform Bulk Messaging Application
-Main application file with GUI and orchestration logic
-Platform-specific logic is in the 'platforms' folder
-"""
-
-# Standard library imports
+# auto_messenger_ultra_fast.py
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.common.exceptions import TimeoutException
+from webdriver_manager.chrome import ChromeDriverManager
 import pandas as pd
 import time
 import random
 import os
+import sys
+import subprocess
+import shutil
+import time
 import threading
-import re
+import urllib.parse
 import tkinter as tk
 from tkinter import filedialog, scrolledtext, messagebox, ttk
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
+import re
+import datetime
 
+import undetected_chromedriver as uc
 
-# Platform-specific sender imports
-from platforms.whatsapp import send_message_whatsapp
-from platforms.email_sender import send_email_smtp
-from platforms.sms import send_message_sms, detect_android_device
-from platforms.messenger import send_message_messenger
+# --- Robust ADB Detection and Installation ---
+def check_and_install_adb():
+    # Step 1: Check if adb is already in PATH
+    if shutil.which("adb"):
+        return "system"
+    # Step 2: Try to install via Winget (internet needed)
+    winget_cmd = [
+        "winget", "install", "--id", "Google.PlatformTools", "-e",
+        "--silent", "--accept-package-agreements", "--accept-source-agreements"
+    ]
+    try:
+        result = subprocess.run(winget_cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode == 0 and shutil.which("adb"):
+            return "system"
+    except Exception:
+        pass
+    # Step 3: Fallback to bundled adb.exe (always works offline)
+    bundled_path = os.path.join(get_base_path(), "resources", "platform-tools", "adb.exe")
+    if os.path.exists(bundled_path):
+        return bundled_path
+    else:
+        messagebox.showerror("ADB Error", "ADB not found!\nPlease connect to the internet and restart, or contact support.")
+        sys.exit(1)
 
-# Utility imports
-from utils.driver import create_driver, PROFILE_DIR, HEADLESS
+def get_base_path():
+    if getattr(sys, 'frozen', False):
+        return sys._MEIPASS
+    return os.path.dirname(__file__)
 
-# Check SMS availability
+# --- Universal ADB Command Wrapper ---
+def adb(*args):
+    global _adb_path
+    if '_adb_path' not in globals():
+        _adb_path = check_and_install_adb()  # Runs only once
+    if _adb_path == "system":
+        cmd = ["adb"] + list(args)
+    else:
+        cmd = [_adb_path] + list(args)
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+# SMS via Android phone
 try:
     from ppadb.client import Client as AdbClient
     ADB_AVAILABLE = True
@@ -32,350 +79,17 @@ except ImportError:
     ADB_AVAILABLE = False
 
 # ==================== CONFIG ====================
+
+PROFILE_DIR = os.path.join(os.getenv("APPDATA"), "AutoMessenger", "chrome_profile")
+os.makedirs(PROFILE_DIR, exist_ok=True)
+
+HEADLESS = False
 MIN_DELAY = 3
 MAX_DELAY = 7
+WAIT_TIMEOUT = 15
+FAST_WAIT = 4
+POST_CLICK_WAIT = 0.8
 # ===============================================
-
-# --- AI Text Generation Function ---
-def generate_ai_text(prompt, log_fn):
-    """
-    Generate text using Hugging Face's free Inference API.
-    Uses a working text generation model.
-    """
-    if not prompt or not prompt.strip():
-        return "Please enter a prompt to generate text."
-
-    try:
-        # Try multiple models in case one is unavailable
-        models_to_try = [
-            "gpt2",  # Basic GPT-2
-            "distilgpt2",  # Distilled GPT-2
-            "microsoft/DialoGPT-small",  # Conversational AI
-            "google/flan-t5-small",  # Instruction-following model
-        ]
-
-        # Use a placeholder API key - user needs to get their own from huggingface.co
-        openai_key = ""  # Add your OpenAI API key here for better results (optional)
-        # Get your key from: https://platform.openai.com/api-keys
-        if openai_key:
-            try:
-                log_fn("🤖 Trying OpenAI API first...")
-                openai_headers = {
-                    "Authorization": f"Bearer {openai_key}",
-                    "Content-Type": "application/json"
-                }
-                openai_payload = {
-                    "model": "gpt-3.5-turbo",
-                    "messages": [{"role": "user", "content": f"Write a professional message: {prompt}"}],
-                    "max_tokens": 150,
-                    "temperature": 0.7
-                }
-                openai_response = requests.post("https://api.openai.com/v1/chat/completions",
-                                              headers=openai_headers, json=openai_payload, timeout=30)
-
-                if openai_response.status_code == 200:
-                    result = openai_response.json()
-                    if "choices" in result and len(result["choices"]) > 0:
-                        generated_text = result["choices"][0]["message"]["content"].strip()
-                        return generated_text
-
-                log_fn(f"⚠️ OpenAI failed: {openai_response.status_code}")
-            except Exception as e:
-                log_fn(f"⚠️ OpenAI error: {str(e)[:50]}")
-
-        log_fn("🤖 Generating AI text...")
-        log_fn(f"🔑 Using API key: {headers['Authorization'][:20]}...")
-
-        # Test API key with a simple request first
-        test_url = "https://huggingface.co/api/whoami-v2"
-        try:
-            test_response = requests.get(test_url, headers=headers, timeout=10)
-            if test_response.status_code == 200:
-                log_fn("✅ API key is valid")
-            else:
-                log_fn(f"⚠️ API key test failed: {test_response.status_code}")
-        except Exception as e:
-            log_fn(f"⚠️ API key test error: {str(e)[:50]}")
-
-        last_error = None
-
-        for model in models_to_try:
-            try:
-                API_URL = f"https://api-inference.huggingface.co/models/{model}"
-
-                # Prepare the payload based on model type
-                if "flan" in model.lower():
-                    # FLAN-T5 models need instruction format
-                    payload = {
-                        "inputs": prompt,
-                        "parameters": {
-                            "max_length": 150,
-                            "temperature": 0.8,
-                            "do_sample": True,
-                        }
-                    }
-                elif "dialogpt" in model.lower():
-                    # DialoGPT works better with conversational input
-                    payload = {
-                        "inputs": prompt,
-                        "parameters": {
-                            "max_length": 100,
-                            "temperature": 0.7,
-                            "do_sample": True,
-                        }
-                    }
-                else:
-                    # Default GPT-style models
-                    payload = {
-                        "inputs": prompt,
-                        "parameters": {
-                            "max_length": 100,
-                            "temperature": 0.7,
-                            "do_sample": True,
-                        }
-                    }
-
-                log_fn(f"🤖 Trying model: {model}")
-
-                # Make API request
-                response = requests.post(API_URL, headers=headers, json=payload, timeout=45)
-                log_fn(f"📡 HTTP Status: {response.status_code}")
-
-                if response.status_code == 200:
-                    result = response.json()
-                    if isinstance(result, list) and len(result) > 0:
-                        generated_text = result[0].get('generated_text', '')
-                        # Remove the original prompt from the response
-                        if generated_text.startswith(prompt):
-                            generated_text = generated_text[len(prompt):].strip()
-                        elif "Write a message:" in prompt and generated_text.startswith("Write a message:"):
-                            generated_text = generated_text[len("Write a message:"):].strip()
-                        return generated_text if generated_text else "No text generated."
-                    else:
-                        return "Unexpected API response format."
-                elif response.status_code == 503:
-                    log_fn(f"⚠️ Model {model} is loading, trying next...")
-                    continue  # Try next model
-                elif response.status_code == 403:
-                    return "❌ Invalid API key. Please get a free Hugging Face API key from huggingface.co/settings/tokens"
-                elif response.status_code == 410:
-                    log_fn(f"⚠️ Model {model} unavailable (410 Gone), trying next...")
-                    continue  # Try next model
-                else:
-                    error_msg = f"HTTP {response.status_code}: {response.text[:100]}"
-                    log_fn(f"⚠️ Model {model} failed: {error_msg}")
-                    last_error = error_msg
-                    continue  # Try next model
-
-            except Exception as e:
-                last_error = str(e)
-                log_fn(f"⚠️ Model {model} error: {str(e)[:100]}")
-                continue
-
-            # Small delay between model attempts
-            time.sleep(1)
-
-        # If all models failed, provide a professional business template based on the prompt
-        log_fn("⚠️ All external AI models failed, generating professional business template...")
-
-        # Create a professional business message template based on keywords in the prompt
-        prompt_lower = prompt.lower()
-
-        if "handmade" in prompt_lower and "artisan" in prompt_lower and "website" in prompt_lower:
-            return """Hello [Company Name],
-
-Namaste,
-
-This is Razu Shrestha, CEO and Founder of NepaTronix Engineering Solution Pvt. Ltd.
-We create modern, high-performing, and fully automated websites for handmade and artisan product businesses to help them showcase their craftsmanship beautifully, attract global buyers, and build a strong digital brand identity.
-
-Our website system for handmade businesses includes:
-• Dynamic product catalog with images, categories, materials, and pricing
-• Online inquiry, quotation, and wholesale order system
-• Story and craftsmanship section to highlight your brand's heritage
-• Artisan profiles to showcase the people behind the craft
-• Blog and SEO tools for international visibility
-• Clean, elegant, and mobile-friendly design that reflects your artistry
-• Dealer and export management panel
-
-We follow Google's highest website standards:
-SEO: 100% optimized
-Performance: 100%
-Accessibility: 100%
-Best Practices: 100%
-
-Additionally, we provide:
-• Super-fast VPS hosting (100GB space)
-• 1-year AMC free
-• Unlimited technical support
-
-Here are a few examples of our work:
-https://event-solution.vercel.app/
-https://himalayasummitevents.com/
-https://campsitenepal.com/
-https://karnorr.com/
-
-You can learn more about us from our company profile:
-https://docs.google.com/document/d/1XjA1dCGYDhQvkWzDx9vFLmPq8Pwh1i_GJ_IDfLm4C2Y/edit?usp=sharing
-
-If you're planning to take your handmade business online or upgrade your current website, please share your available time or fill out this meeting form:
-https://forms.gle/8bDXVzgh2AEPiZ3U9
-
-Best regards,
-Razu Shrestha
-CEO & Founder
-NepaTronix Engineering Solution Pvt. Ltd.
-9803661701"""
-
-        elif "professional" in prompt_lower and "service" in prompt_lower:
-            return """Hello [Company Name],
-
-Namaste,
-
-This is Razu Shrestha, CEO and Founder of NepaTronix Engineering Solution Pvt. Ltd.
-We specialize in providing comprehensive professional services tailored to meet your business needs. Our team of experts is committed to delivering high-quality solutions that drive results and help your business grow.
-
-Our professional services include:
-• Strategic business consulting and planning
-• Digital transformation and automation solutions
-• Custom software development and integration
-• Data analytics and business intelligence
-• Cloud infrastructure and migration services
-• Cybersecurity and compliance management
-• Training and capacity building programs
-
-We follow industry best practices and standards:
-• ISO 9001:2015 certified processes
-• Agile development methodology
-• 99.9% service uptime guarantee
-• 24/7 technical support
-• Regular security audits and updates
-
-Additionally, we provide:
-• Comprehensive project documentation
-• Post-implementation support and maintenance
-• Performance monitoring and optimization
-• Scalable and flexible service packages
-
-Here are a few examples of our work:
-https://event-solution.vercel.app/
-https://himalayasummitevents.com/
-https://campsitenepal.com/
-
-You can learn more about us from our company profile:
-https://docs.google.com/document/d/1XjA1dCGYDhQvkWzDx9vFLmPq8Pwh1i_GJ_IDfLm4C2Y/edit?usp=sharing
-
-If you're interested in our professional services, please share your requirements or fill out this consultation form:
-https://forms.gle/8bDXVzgh2AEPiZ3U9
-
-Best regards,
-Razu Shrestha
-CEO & Founder
-NepaTronix Engineering Solution Pvt. Ltd.
-9803661701"""
-
-        elif "website" in prompt_lower and "development" in prompt_lower:
-            return """Hello [Company Name],
-
-Namaste,
-
-This is Razu Shrestha, CEO and Founder of NepaTronix Engineering Solution Pvt. Ltd.
-We create modern, high-performing, and fully automated websites for businesses looking to establish a strong online presence. Our expert team delivers cutting-edge web solutions that engage visitors and drive conversions.
-
-Our website development services include:
-• Custom website design and development
-• E-commerce platform setup and integration
-• Content management system (CMS) implementation
-• Mobile-responsive design and optimization
-• Search engine optimization (SEO) setup
-• Website security and performance optimization
-• Analytics and tracking integration
-
-We follow Google's highest website standards:
-SEO: 100% optimized
-Performance: 100%
-Accessibility: 100%
-Best Practices: 100%
-
-Additionally, we provide:
-• Super-fast VPS hosting (100GB space)
-• 1-year AMC free
-• Unlimited technical support
-• Domain registration and SSL certificates
-
-Here are a few examples of our work:
-https://event-solution.vercel.app/
-https://himalayasummitevents.com/
-https://campsitenepal.com/
-https://karnorr.com/
-
-You can learn more about us from our company profile:
-https://docs.google.com/document/d/1XjA1dCGYDhQvkWzDx9vFLmPq8Pwh1i_GJ_IDfLm4C2Y/edit?usp=sharing
-
-If you're planning to take your business online or upgrade your current website, please share your available time or fill out this meeting form:
-https://forms.gle/8bDXVzgh2AEPiZ3U9
-
-Best regards,
-Razu Shrestha
-CEO & Founder
-NepaTronix Engineering Solution Pvt. Ltd.
-9803661701"""
-
-        else:
-            # Generic professional business template
-            return """Hello [Company Name],
-
-Namaste,
-
-This is Razu Shrestha, CEO and Founder of NepaTronix Engineering Solution Pvt. Ltd.
-We specialize in delivering innovative technology solutions that help businesses thrive in the digital age. Our team combines technical expertise with business acumen to create solutions that drive real results.
-
-Our services include:
-• Custom software development
-• Web application development
-• Digital marketing and SEO
-• Business process automation
-• Data analytics and insights
-• Cloud solutions and infrastructure
-• Technical consulting and support
-
-We follow industry best practices:
-• Modern development frameworks and technologies
-• Agile development methodology
-• Quality assurance and testing
-• Security-first approach
-• Scalable and maintainable solutions
-
-Additionally, we provide:
-• Comprehensive project documentation
-• Post-launch support and maintenance
-• Performance monitoring and optimization
-• Training and knowledge transfer
-
-Here are a few examples of our work:
-https://event-solution.vercel.app/
-https://himalayasummitevents.com/
-https://campsitenepal.com/
-
-You can learn more about us from our company profile:
-https://docs.google.com/document/d/1XjA1dCGYDhQvkWzDx9vFLmPq8Pwh1i_GJ_IDfLm4C2Y/edit?usp=sharing
-
-If you're interested in our services, please share your requirements or fill out this consultation form:
-https://forms.gle/8bDXVzgh2AEPiZ3U9
-
-Best regards,
-Razu Shrestha
-CEO & Founder
-NepaTronix Engineering Solution Pvt. Ltd.
-9803661701"""
-
-    except requests.exceptions.Timeout:
-        return "⏱️ Request timed out. Please try again."
-    except requests.exceptions.ConnectionError:
-        return "🌐 Connection error. Check your internet connection."
-    except Exception as e:
-        log_fn(f"AI Generation Error: {str(e)}")
-        return f"❌ Error generating text: {str(e)}"
 
 # --- Helper: Extract numeric digits from phone numbers ---
 def extract_phone_digits(phone_str):
@@ -386,10 +100,971 @@ def extract_phone_digits(phone_str):
         "Phone: 9779803661701" -> "9779803661701"
         "977 (980) 366-1701" -> "9779803661701"
     """
+    import re
     digits = re.sub(r'\D', '', str(phone_str))
     return digits.strip()
 
-# ====================GUI CODE STARTS HERE ====================
+# --- Helper: create Chrome driver on demand (so GUI can start first) ---
+
+
+def create_driver(profile_dir=PROFILE_DIR, headless=HEADLESS):
+    # Make sure profile directory exists
+    os.makedirs(profile_dir, exist_ok=True)
+
+    # Create Chrome options
+    options = uc.ChromeOptions()
+    options.add_argument(f"--user-data-dir={profile_dir}")
+
+    # Headless mode (WhatsApp blocks old headless, "new" is ok)
+    if headless:
+        options.add_argument("--headless=new")
+
+    # Keep everything else as normal as possible
+    # Avoid anti-detection flags like disable-blink-features!
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+
+    # Create real undetected Chrome
+    driver = uc.Chrome(options=options)
+
+    return driver
+
+
+# --- Messaging actions (WhatsApp with attachment support) ---
+def send_message_whatsapp(driver, phone, message, log_fn, stop_event, attachment_path=None, delay_seconds=60):
+    """
+    Send a WhatsApp message to a single phone number using a Selenium driver.
+    Compatible with web.whatsapp.com, assuming user is logged in.
+
+    Args:
+        driver: Selenium WebDriver instance
+        phone: str, phone number (with or without '+')
+        message: str, text message to send
+        log_fn: callable, logging function
+        stop_event: threading.Event, used to stop execution gracefully
+        attachment_path: str, optional path to file to attach (PDF, PNG, JPG, etc.)
+        delay_seconds: int, number of seconds to wait after sending (default: 60)
+    """
+    if stop_event.is_set():
+        log_fn("Stopped before sending.")
+        return False
+
+    try:
+        # Format phone correctly
+        phone = str(phone).strip()
+        if not phone:
+            log_fn("❌ Empty phone number, skipping.")
+            return False
+        if phone.startswith("+"):
+            phone = phone[1:]
+
+        # Navigate to chat URL
+        url = f"https://web.whatsapp.com/send?phone={phone}&app_absent=0"
+        driver.get(url)
+        log_fn(f"Opening chat with {phone}...")
+        time.sleep(5)
+
+        # Wait for chat to fully load
+        wait = WebDriverWait(driver, 20)
+        try:
+            # Wait for message input box (indicates chat is ready)
+            input_box = wait.until(
+                EC.presence_of_element_located((By.XPATH, '//div[@contenteditable="true"][@data-tab="10"]'))
+            )
+            log_fn(f"  ✅ Chat loaded successfully")
+            time.sleep(2)  # Extra wait for all elements to render
+        except TimeoutException:
+            log_fn(f"⏳ Timeout: Chat not ready for {phone}")
+            return False
+
+        if stop_event.is_set():
+            log_fn("Stopped before typing message.")
+            return False
+
+        # Handle file attachment if provided
+        if attachment_path and os.path.exists(attachment_path):
+            log_fn(f"📎 Attaching file: {os.path.basename(attachment_path)}")
+            
+            # Show file info
+            file_size_mb = os.path.getsize(attachment_path) / (1024 * 1024)
+            file_ext = os.path.splitext(attachment_path)[1].lower()
+            is_video = file_ext in ['.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v']
+            log_fn(f"  📦 File size: {file_size_mb:.1f}MB, Type: {file_ext}")
+            
+            try:
+                # AGGRESSIVE ATTACH BUTTON SEARCH
+                log_fn(f"  🔍 Searching for attach button (trying all methods)...")
+                
+                attach_clicked = False
+                
+                # Method 1: Find by data-icon attribute (most common)
+                try:
+                    log_fn(f"  🎯 Method 1: Looking for plus/attach icons...")
+                    time.sleep(1)
+                    icons = driver.find_elements(By.XPATH, '//span[@data-icon]')
+                    for icon in icons:
+                        icon_name = icon.get_attribute('data-icon')
+                        if icon_name and ('plus' in icon_name or 'attach' in icon_name or 'clip' in icon_name):
+                            parent = icon.find_element(By.XPATH, '..')
+                            if parent.is_displayed():
+                                driver.execute_script("arguments[0].click();", parent)
+                                log_fn(f"  ✅ Clicked attach via icon: {icon_name}")
+                                attach_clicked = True
+                                break
+                except Exception as e:
+                    log_fn(f"  ❌ Method 1 failed: {str(e)[:50]}")
+                
+                # Method 2: Find by title or aria-label
+                if not attach_clicked:
+                    try:
+                        log_fn(f"  🎯 Method 2: Looking for Attach labels...")
+                        buttons = driver.find_elements(By.XPATH, '//*[@title or @aria-label]')
+                        for btn in buttons:
+                            title = (btn.get_attribute('title') or '').lower()
+                            aria = (btn.get_attribute('aria-label') or '').lower()
+                            if ('attach' in title or 'attach' in aria) and btn.is_displayed():
+                                driver.execute_script("arguments[0].click();", btn)
+                                log_fn(f"  ✅ Clicked attach via label")
+                                attach_clicked = True
+                                break
+                    except Exception as e:
+                        log_fn(f"  ❌ Method 2 failed: {str(e)[:50]}")
+                
+                # Method 3: Find ALL file inputs and trigger click on visible one
+                if not attach_clicked:
+                    try:
+                        log_fn(f"  🎯 Method 3: Direct file input search...")
+                        file_inputs = driver.find_elements(By.XPATH, '//input[@type="file"]')
+                        log_fn(f"  📋 Found {len(file_inputs)} file inputs")
+                        
+                        # Try to find a visible parent to click
+                        for inp in file_inputs:
+                            try:
+                                # Check if this input accepts our file type
+                                accept = inp.get_attribute('accept') or '*'
+                                if '*' in accept or '.mp4' in accept or 'video' in accept:
+                                    log_fn(f"  ✅ Found compatible file input, sending file directly...")
+                                    abs_path = os.path.abspath(attachment_path)
+                                    inp.send_keys(abs_path)
+                                    log_fn(f"  ✅ File sent directly to input!")
+                                    attach_clicked = True
+                                    break
+                            except Exception as sub_e:
+                                continue
+                    except Exception as e:
+                        log_fn(f"  ❌ Method 3 failed: {str(e)[:50]}")
+                
+                # Method 4: JavaScript injection to find and click
+                if not attach_clicked:
+                    try:
+                        log_fn(f"  🎯 Method 4: JavaScript search...")
+                        script = """
+                        // Find all elements with attach-related attributes
+                        var elements = document.querySelectorAll('*[data-icon*="plus"], *[data-icon*="attach"], *[data-icon*="clip"], *[title*="Attach"], *[aria-label*="Attach"]');
+                        for(var i=0; i<elements.length; i++) {
+                            if(elements[i].offsetParent !== null) {
+                                elements[i].click();
+                                return 'clicked: ' + elements[i].tagName;
+                            }
+                        }
+                        return 'not found';
+                        """
+                        result = driver.execute_script(script)
+                        if 'clicked' in result:
+                            log_fn(f"  ✅ JavaScript found and clicked: {result}")
+                            attach_clicked = True
+                    except Exception as e:
+                        log_fn(f"  ❌ Method 4 failed: {str(e)[:50]}")
+                
+                if not attach_clicked:
+                    log_fn(f"  ❌ ALL ATTACH METHODS FAILED!")
+                    log_fn(f"  💡 WhatsApp Web interface may have changed")
+                    raise Exception("Could not find attach button after trying 4 methods")
+                
+                time.sleep(3)
+                
+                # Find file input (if attach button was clicked, this should be available)
+                log_fn(f"  🔍 Looking for file input...")
+                
+                file_input = None
+                file_input_wait = WebDriverWait(driver, 10)
+                
+                # Wait for file input to appear after clicking attach
+                try:
+                    file_input = file_input_wait.until(
+                        EC.presence_of_element_located((By.XPATH, '//input[@type="file"]'))
+                    )
+                    log_fn(f"  ✅ File input found")
+                except:
+                    # Try to find any file input
+                    log_fn(f"  ⚠️ File input not found via wait, searching manually...")
+                    inputs = driver.find_elements(By.XPATH, '//input[@type="file"]')
+                    if inputs:
+                        file_input = inputs[0]
+                        log_fn(f"  ✅ Found file input manually")
+                    else:
+                        raise Exception("No file input element found")
+                
+                log_fn(f"  📤 Uploading file...")
+                abs_path = os.path.abspath(attachment_path)
+                file_input.send_keys(abs_path)
+                log_fn(f"  ✅ File sent to browser: {os.path.basename(attachment_path)}")
+                time.sleep(3)
+                
+                # Wait for video processing
+                if is_video:
+                    log_fn(f"  📹 Video detected - Size: {file_size_mb:.1f}MB")
+                    log_fn(f"  ⏳ Waiting for video preview (10 seconds)...")
+                    time.sleep(10)  # Wait 10 seconds for preview to load
+                    log_fn(f"  ✅ Video preview ready")
+                else:
+                    time.sleep(5)  # Images/documents
+                
+                # Add caption if message provided
+                if message and message.strip():
+                    try:
+                        # Wait for preview to fully load
+                        time.sleep(1)
+                        
+                        # Try multiple selectors for caption box
+                        caption_box = None
+                        caption_selectors = [
+                            '//div[@contenteditable="true"][@role="textbox"]',
+                            '//div[@contenteditable="true" and contains(@aria-label, "caption")]',
+                            '//div[@contenteditable="true" and @data-tab="10"]',
+                            '//div[@contenteditable="true" and contains(@class, "lexical")]',
+                            '//div[contains(@aria-placeholder, "Add a caption")]',
+                        ]
+                        
+                        for selector in caption_selectors:
+                            try:
+                                caption_box = driver.find_element(By.XPATH, selector)
+                                log_fn(f"  ✅ Caption box found with selector: {selector[:40]}...")
+                                break
+                            except:
+                                continue
+                        
+                        if caption_box:
+                            # Scroll into view and focus
+                            driver.execute_script("arguments[0].scrollIntoView(true);", caption_box)
+                            time.sleep(0.3)
+                            driver.execute_script("arguments[0].focus();", caption_box)
+                            time.sleep(0.3)
+                            driver.execute_script("arguments[0].click();", caption_box)
+                            time.sleep(0.5)
+                            
+                            # Type caption
+                            log_fn(f"  📝 Typing caption...")
+                            lines = message.split('\n')
+                            for i, line in enumerate(lines):
+                                if line.strip():
+                                    caption_box.send_keys(line)
+                                if i < len(lines) - 1:
+                                    caption_box.send_keys(Keys.SHIFT + Keys.ENTER)
+                            
+                            log_fn(f"  ✅ Caption added successfully!")
+                        else:
+                            log_fn(f"  ⚠️ Caption box not found - attachment will send without caption")
+                            
+                    except Exception as e:
+                        log_fn(f"  ⚠️ Caption error: {str(e)[:80]}")
+                
+                # ULTRA AGGRESSIVE SEND BUTTON CLICKING
+                time.sleep(3)
+                log_fn(f"  📤 Looking for SEND button...")
+                
+                send_clicked = False
+                
+                # Method 1: Wait for send icon and try multiple clicks
+                if not send_clicked:
+                    try:
+                        log_fn(f"  🎯 Method 1: Waiting for send icon...")
+                        send_wait = WebDriverWait(driver, 20)
+                        send_icon = send_wait.until(EC.presence_of_element_located((By.XPATH, '//span[@data-icon="send"]')))
+                        
+                        # Scroll into view
+                        driver.execute_script("arguments[0].scrollIntoView({block:'center', behavior:'instant'});", send_icon)
+                        time.sleep(0.5)
+                        
+                        # Try multiple click methods on the same element
+                        try:
+                            send_icon.click()
+                            log_fn(f"  ✅ Clicked send icon (direct)")
+                        except:
+                            pass
+                        
+                        time.sleep(0.3)
+                        
+                        try:
+                            driver.execute_script("arguments[0].click();", send_icon)
+                            log_fn(f"  ✅ Clicked send icon (JavaScript)")
+                        except:
+                            pass
+                        
+                        time.sleep(0.3)
+                        
+                        try:
+                            actions = ActionChains(driver)
+                            actions.move_to_element(send_icon).click().perform()
+                            log_fn(f"  ✅ Clicked send icon (ActionChains)")
+                        except:
+                            pass
+                        
+                        log_fn(f"  ✅ SENT via send icon (multiple attempts)!")
+                        send_clicked = True
+                    except Exception as e:
+                        log_fn(f"  ❌ Method 1 failed: {str(e)[:50]}")
+                
+                # Method 2: Click parent/grandparent of send icon
+                if not send_clicked:
+                    try:
+                        log_fn(f"  🎯 Method 2: Clicking send icon containers...")
+                        send_icons = driver.find_elements(By.XPATH, '//span[@data-icon="send"]')
+                        for icon in send_icons:
+                            if icon.is_displayed():
+                                # Try parent
+                                try:
+                                    parent = icon.find_element(By.XPATH, '..')
+                                    driver.execute_script("arguments[0].click();", parent)
+                                    log_fn(f"  ✅ SENT via parent!")
+                                    send_clicked = True
+                                    break
+                                except:
+                                    # Try grandparent
+                                    try:
+                                        grandparent = icon.find_element(By.XPATH, '../..')
+                                        driver.execute_script("arguments[0].click();", grandparent)
+                                        log_fn(f"  ✅ SENT via grandparent!")
+                                        send_clicked = True
+                                        break
+                                    except:
+                                        continue
+                    except Exception as e:
+                        log_fn(f"  ❌ Method 2 failed: {str(e)[:50]}")
+                
+                # Method 3: Find button element with send icon inside
+                if not send_clicked:
+                    try:
+                        log_fn(f"  🎯 Method 3: Finding button with send icon...")
+                        buttons = driver.find_elements(By.XPATH, '//button | //div[@role="button"]')
+                        for btn in buttons:
+                            try:
+                                inner_html = btn.get_attribute('innerHTML')
+                                if 'data-icon="send"' in inner_html and btn.is_displayed():
+                                    driver.execute_script("arguments[0].click();", btn)
+                                    log_fn(f"  ✅ SENT via button!")
+                                    send_clicked = True
+                                    break
+                            except:
+                                continue
+                    except Exception as e:
+                        log_fn(f"  ❌ Method 3 failed: {str(e)[:50]}")
+                
+                # Method 4: SUPER AGGRESSIVE JavaScript - click everything
+                if not send_clicked:
+                    try:
+                        log_fn(f"  🎯 Method 4: JavaScript MEGA click...")
+                        result = driver.execute_script("""
+                            // Find all send icons
+                            var icons = document.querySelectorAll('span[data-icon="send"]');
+                            var clicked = 0;
+                            
+                            for(var i=0; i<icons.length; i++) {
+                                if(icons[i].offsetParent !== null) {
+                                    // Click icon
+                                    icons[i].click();
+                                    clicked++;
+                                    
+                                    // Click parent
+                                    if(icons[i].parentElement) {
+                                        icons[i].parentElement.click();
+                                        clicked++;
+                                    }
+                                    
+                                    // Click grandparent
+                                    if(icons[i].parentElement && icons[i].parentElement.parentElement) {
+                                        icons[i].parentElement.parentElement.click();
+                                        clicked++;
+                                    }
+                                    
+                                    // Dispatch click event
+                                    var event = new MouseEvent('click', {
+                                        bubbles: true,
+                                        cancelable: true,
+                                        view: window
+                                    });
+                                    icons[i].dispatchEvent(event);
+                                    icons[i].parentElement.dispatchEvent(event);
+                                    clicked++;
+                                }
+                            }
+                            
+                            return clicked;
+                        """)
+                        log_fn(f"  ✅ JavaScript performed {result} click attempts!")
+                        if result > 0:
+                            send_clicked = True
+                        else:
+                            log_fn(f"  ⚠️ JavaScript found no visible send icons")
+                    except Exception as e:
+                        log_fn(f"  ❌ Method 4 failed: {str(e)[:50]}")
+                
+                # Method 5: ActionChains hover and click
+                if not send_clicked:
+                    try:
+                        log_fn(f"  🎯 Method 5: ActionChains hover + click...")
+                        send_icon = driver.find_element(By.XPATH, '//span[@data-icon="send"]')
+                        actions = ActionChains(driver)
+                        actions.move_to_element(send_icon).pause(0.5).click().perform()
+                        log_fn(f"  ✅ SENT via ActionChains!")
+                        send_clicked = True
+                    except Exception as e:
+                        log_fn(f"  ❌ Method 5 failed: {str(e)[:50]}")
+                
+                # Method 6: Press Enter in any editable field
+                if not send_clicked:
+                    try:
+                        log_fn(f"  🎯 Method 6: Pressing Enter in editable field...")
+                        editables = driver.find_elements(By.XPATH, '//div[@contenteditable="true"]')
+                        for edit in editables:
+                            if edit.is_displayed():
+                                edit.click()
+                                time.sleep(0.3)
+                                edit.send_keys(Keys.ENTER)
+                                log_fn(f"  ✅ SENT via Enter key!")
+                                send_clicked = True
+                                break
+                    except Exception as e:
+                        log_fn(f"  ❌ Method 6 failed: {str(e)[:50]}")
+                
+                # Method 7: BRUTE FORCE - Try clicking EVERYTHING that might be send button
+                if not send_clicked:
+                    try:
+                        log_fn(f"  🎯 Method 7: BRUTE FORCE - clicking all possible buttons...")
+                        
+                        # Get ALL elements that could possibly be the send button
+                        possible_buttons = driver.find_elements(By.XPATH, 
+                            '//*[contains(@class, "send") or contains(@aria-label, "Send") or '
+                            'contains(@title, "Send") or @data-icon="send" or '
+                            'contains(@class, "compose") or @role="button"]'
+                        )
+                        
+                        click_count = 0
+                        for elem in possible_buttons:
+                            try:
+                                if elem.is_displayed():
+                                    driver.execute_script("arguments[0].click();", elem)
+                                    click_count += 1
+                            except:
+                                continue
+                        
+                        log_fn(f"  ✅ Brute force clicked {click_count} elements!")
+                        if click_count > 0:
+                            send_clicked = True
+                    except Exception as e:
+                        log_fn(f"  ❌ Method 7 failed: {str(e)[:50]}")
+                
+                # Method 8: Last resort - simulate keyboard shortcut
+                if not send_clicked:
+                    try:
+                        log_fn(f"  🎯 Method 8: Keyboard shortcut (Ctrl+Enter)...")
+                        actions = ActionChains(driver)
+                        actions.key_down(Keys.CONTROL).send_keys(Keys.ENTER).key_up(Keys.CONTROL).perform()
+                        log_fn(f"  ✅ Sent Ctrl+Enter!")
+                        send_clicked = True
+                    except Exception as e:
+                        log_fn(f"  ❌ Method 8 failed: {str(e)[:50]}")
+                
+                # If STILL not clicked, wait and monitor
+                if not send_clicked:
+                    log_fn(f"  ❌ ALL 8 METHODS FAILED!")
+                    log_fn(f"  ⚠️ Video preview may still be processing...")
+                    log_fn(f"  ⏳ Monitoring for 30 seconds...")
+                    
+                    # Keep trying every 3 seconds
+                    for attempt in range(10):
+                        time.sleep(3)
+                        try:
+                            # Try clicking send icon again
+                            send_icon = driver.find_element(By.XPATH, '//span[@data-icon="send"]')
+                            driver.execute_script("arguments[0].click();", send_icon)
+                            log_fn(f"  ✅ Send button clicked on retry {attempt+1}!")
+                            send_clicked = True
+                            break
+                        except:
+                            if attempt % 3 == 0:
+                                log_fn(f"  ⏳ Still trying... ({(attempt+1)*3}s)")
+                            continue
+                    
+                    if not send_clicked:
+                        log_fn(f"  ⚠️ Could not auto-send - video may need manual click")
+                        send_clicked = True  # Continue anyway
+                
+                if send_clicked:
+                    # Wait for message to be sent
+                    if is_video:
+                        # Calculate upload wait time based on file size
+                        # Formula: 3 seconds per MB (generous for large videos)
+                        upload_wait = int(file_size_mb * 3)
+                        
+                        # For large videos (30MB+), ensure minimum 2 minutes
+                        if file_size_mb >= 30:
+                            upload_wait = max(upload_wait, 120)  # Minimum 2 minutes for 30MB+
+                        
+                        # Cap at 3 minutes max
+                        upload_wait = min(upload_wait, 180)
+                        
+                        log_fn(f"  📤 Uploading {file_size_mb:.1f}MB video to WhatsApp...")
+                        log_fn(f"  ⏳ Waiting {upload_wait} seconds ({upload_wait//60}min {upload_wait%60}sec)")
+                        log_fn(f"  ⚠️ CRITICAL: DO NOT close browser, change chat, or click anything!")
+                        
+                        # Wait the FULL time - absolutely no early exit
+                        for i in range(upload_wait):
+                            # Show progress every 10 seconds
+                            if i % 10 == 9:
+                                elapsed = i + 1
+                                percentage = int((elapsed / upload_wait) * 100)
+                                remaining = upload_wait - elapsed
+                                log_fn(f"  ⏳ {percentage}% complete | {elapsed}s elapsed | {remaining}s remaining")
+                            
+                            time.sleep(1)
+                        
+                        log_fn(f"  ✅ Upload time complete - waited full {upload_wait} seconds")
+                        log_fn(f"  ⏳ Final safety wait (10 seconds)...")
+                        time.sleep(10)  # Longer safety buffer
+                    else:
+                        log_fn(f"  ⏳ Sending attachment...")
+                        time.sleep(3)  # Images/documents send faster
+                    
+                    log_fn(f"✅ WhatsApp message with attachment sent to {phone}")
+                
+                # Successfully sent attachment, return now
+                return True
+                
+            except Exception as e:
+                log_fn(f"  ❌ ATTACHMENT ERROR: {str(e)}")
+                import traceback
+                error_details = traceback.format_exc()
+                log_fn(f"  📋 Error details: {error_details[:200]}")
+                
+                # If message exists, try sending text only
+                if message and message.strip():
+                    log_fn(f"  📝 Fallback: Sending text only...")
+                    try:
+                        input_box = wait.until(
+                            EC.element_to_be_clickable((By.XPATH, '//div[@contenteditable="true"][@data-tab="10"]'))
+                        )
+                        input_box.click()
+                        time.sleep(0.3)
+                        lines = message.split('\n')
+                        for i, line in enumerate(lines):
+                            if line.strip():
+                                input_box.send_keys(line)
+                            if i < len(lines) - 1:
+                                input_box.send_keys(Keys.SHIFT + Keys.ENTER)
+                        time.sleep(0.5)
+                        input_box.send_keys(Keys.ENTER)
+                        log_fn(f"✅ WhatsApp text message sent to {phone} (attachment failed)")
+                        return True
+                    except Exception as text_err:
+                        log_fn(f"  ❌ Text fallback also failed: {text_err}")
+                        return False
+                else:
+                    # No message and attachment failed
+                    log_fn(f"  ❌ Attachment failed and no text to send")
+                    return False
+        
+        # No attachment - send text only (if message exists)
+        if message and message.strip():
+            try:
+                input_box = wait.until(
+                    EC.element_to_be_clickable((By.XPATH, '//div[@contenteditable="true"][@data-tab="10"]'))
+                )
+                input_box.click()
+                time.sleep(0.3)
+                
+                # Split message by lines and send with proper formatting
+                lines = message.split('\n')
+                for i, line in enumerate(lines):
+                    if line.strip():  # Only send non-empty lines
+                        input_box.send_keys(line)
+                    # Add line break except for the last line
+                    if i < len(lines) - 1:
+                        input_box.send_keys(Keys.SHIFT + Keys.ENTER)
+                
+                time.sleep(0.5)
+                input_box.send_keys(Keys.ENTER)
+                log_fn(f"✅ WhatsApp message sent to {phone}")
+            except Exception as e:
+                log_fn(f"❌ Failed to send text message: {e}")
+                return False
+        else:
+            # No message and no attachment
+            log_fn(f"⚠️ No message or attachment to send for {phone}")
+            return False
+        
+        # Countdown delay to prevent account flagging (using user-configured delay)
+        for remaining in range(delay_seconds, 0, -1):
+            if stop_event.is_set():
+                break
+            log_fn(f"  ⏳ Waiting {remaining} seconds before next message...")
+            time.sleep(1)
+            
+            # Keep session alive by checking page title every 10 seconds
+            if remaining % 10 == 0:
+                try:
+                    driver.title  # This keeps the connection alive
+                except:
+                    log_fn(f"  ⚠️ Browser connection check failed")
+        
+        return True
+
+    except Exception as e:
+        log_fn(f"❌ Failed to send WhatsApp to {phone}: {e}")
+        return False
+
+# --- Email sending via SMTP with attachment support ---
+def send_email_smtp(email_to, subject, body, sender_email, sender_password, log_fn, stop_event, attachment_path=None):
+    """
+    Send an email via SMTP (Gmail/Outlook) with optional attachment.
+    
+    Args:
+        email_to: str, recipient email address
+        subject: str, email subject line
+        body: str, email body (plain text or HTML)
+        sender_email: str, sender email address
+        sender_password: str, sender app password
+        log_fn: callable, logging function
+        stop_event: threading.Event, used to stop execution gracefully
+        attachment_path: str, optional path to file to attach
+    
+    Returns:
+        bool, True if sent successfully, False otherwise
+    """
+    if stop_event.is_set():
+        log_fn("Stopped before sending email.")
+        return False
+    
+    try:
+        # Validate email format
+        if not re.match(r'^[^@]+@[^@]+\.[^@]+$', email_to):
+            log_fn(f"❌ Invalid email format: {email_to}")
+            return False
+        
+        # Create message
+        msg = MIMEMultipart()
+        msg['From'] = sender_email
+        msg['To'] = email_to
+        msg['Subject'] = subject
+        
+        # Attach body
+        msg.attach(MIMEText(body, 'plain'))
+        
+        # Attach file if provided
+        if attachment_path and os.path.exists(attachment_path):
+            try:
+                with open(attachment_path, "rb") as f:
+                    part = MIMEBase("application", "octet-stream")
+                    part.set_payload(f.read())
+                encoders.encode_base64(part)
+                part.add_header(
+                    "Content-Disposition",
+                    f"attachment; filename={os.path.basename(attachment_path)}",
+                )
+                msg.attach(part)
+                log_fn(f"  📎 Attached: {os.path.basename(attachment_path)}")
+            except Exception as e:
+                log_fn(f"  ⚠️ Attachment failed: {e}")
+        
+        # Detect SMTP server based on email domain
+        domain = sender_email.split('@')[1].lower()
+        if 'gmail' in domain:
+            smtp_server = 'smtp.gmail.com'
+            smtp_port = 587
+        elif 'outlook' in domain or 'hotmail' in domain:
+            smtp_server = 'smtp-mail.outlook.com'
+            smtp_port = 587
+        else:
+            smtp_server = 'smtp.gmail.com'
+            smtp_port = 587
+        
+        # Send email
+        server = smtplib.SMTP(smtp_server, smtp_port, timeout=10)
+        server.starttls()
+        server.login(sender_email, sender_password)
+        server.sendmail(sender_email, email_to, msg.as_string())
+        server.quit()
+        
+        log_fn(f"✅ Email sent to {email_to}")
+        
+        # Short delay between emails
+        for remaining in range(2, 0, -1):
+            if stop_event.is_set():
+                break
+            log_fn(f"  ⏳ Waiting {remaining} seconds...")
+            time.sleep(1)
+        
+        return True
+    
+    except smtplib.SMTPAuthenticationError:
+        log_fn(f"❌ Authentication failed. Check email/password (use App Password for Gmail).")
+        return False
+    except smtplib.SMTPException as e:
+        log_fn(f"❌ SMTP error for {email_to}: {e}")
+        return False
+    except Exception as e:
+        log_fn(f"❌ Failed to send email to {email_to}: {e}")
+        return False
+
+# --- SMS sending via Android phone (ADB) ---
+def detect_android_device(log_fn):
+    """
+    Detect connected Android device via ADB.
+    Returns device object if found, None otherwise.
+    """
+    # Use universal ADB wrapper
+    try:
+        # Start ADB server
+        adb("start-server")
+        # List devices
+        result = adb("devices")
+        lines = result.stdout.strip().splitlines()
+        devices = [line for line in lines if line and not line.startswith("List of devices") and "device" in line]
+        if not devices:
+            log_fn("❌ No Android device detected. Enable USB Debugging and connect phone.")
+            return None
+        serial = devices[0].split()[0]
+        log_fn(f"✅ Android device connected: {serial}")
+        return serial
+    except Exception as e:
+        log_fn(f"❌ ADB connection error: {e}")
+        log_fn("💡 Make sure ADB server is running. See SMS setup guide.")
+        return None
+
+def send_message_sms(device, phone, message, log_fn, stop_event, delay_seconds=5):
+    """
+    Send an SMS via Android phone using ADB.
+    Opens SMS app with pre-filled message and attempts to click send button automatically.
+    
+    Args:
+        device: ADB device object
+        phone: str, phone number
+        message: str, SMS text (160 chars recommended)
+        log_fn: callable, logging function
+        stop_event: threading.Event, used to stop execution gracefully
+        delay_seconds: int, seconds to wait after sending (default: 5)
+    
+    Returns:
+        bool, True if sent successfully, False otherwise
+    """
+    if stop_event.is_set():
+        log_fn("Stopped before sending SMS.")
+        return False
+    
+    try:
+        # Validate phone number
+        phone = str(phone).strip()
+        if not phone:
+            log_fn("❌ Empty phone number, skipping.")
+            return False
+        phone_clean = extract_phone_digits(phone)
+        msg_len = len(message)
+        if msg_len > 160:
+            log_fn(f"⚠️ Message length {msg_len} chars (>160). May split into multiple SMS.")
+        message_escaped = message.replace('"', '\\"').replace("'", "\\'").replace("$", "\\$").replace("`", "\\`").replace("\\n", " ")
+        phone_escaped = phone_clean.replace('"', '\\"')
+        log_fn(f"📱 Opening SMS for {phone_clean}...")
+        # Open SMS app with pre-filled message
+        cmd = ["shell", f"am start -a android.intent.action.SENDTO -d sms:{phone_escaped} --es sms_body \"{message_escaped}\""]
+        result = adb(*cmd)
+        if "Error" in result.stdout or "error" in result.stdout.lower():
+            log_fn(f"❌ Failed to open SMS app: {result.stdout}")
+            return False
+        time.sleep(2.5)
+        log_fn(f"🔍 Attempting to auto-click send button...")
+        # Get screen size for calculating tap positions
+        screen_size = adb("shell", "wm size").stdout
+        width, height = 1080, 2400
+        try:
+            size_match = re.search(r'(\d+)x(\d+)', screen_size)
+            if size_match:
+                width = int(size_match.group(1))
+                height = int(size_match.group(2))
+                log_fn(f"📐 Screen: {width}x{height}")
+        except:
+            pass
+        # Method 1: Try common send button positions
+        send_positions = [
+            (int(width * 0.92), int(height * 0.93)),
+            (int(width * 0.90), int(height * 0.95)),
+            (int(width * 0.88), int(height * 0.90)),
+            (int(width * 0.85), int(height * 0.88)),
+            (int(width * 0.95), int(height * 0.92)),
+        ]
+        for x, y in send_positions:
+            adb("shell", f"input tap {x} {y}")
+            time.sleep(0.3)
+        # Method 2: Try ENTER key
+        adb("shell", "input keyevent 66")
+        time.sleep(0.3)
+        # Method 3: D-PAD navigation + CENTER key
+        adb("shell", "input keyevent 22")
+        time.sleep(0.2)
+        adb("shell", "input keyevent 23")
+        time.sleep(0.3)
+        # Method 4: Additional screen regions
+        additional_positions = [
+            (int(width * 0.80), int(height * 0.92)),
+            (int(width * 0.75), int(height * 0.95)),
+            (int(width * 0.70), int(height * 0.93)),
+        ]
+        for x, y in additional_positions:
+            adb("shell", f"input tap {x} {y}")
+            time.sleep(0.3)
+        # Method 5: Swipe gesture
+        start_x = int(width * 0.85)
+        start_y = int(height * 0.92)
+        end_x = int(width * 0.95)
+        end_y = int(height * 0.92)
+        adb("shell", f"input swipe {start_x} {start_y} {end_x} {end_y} 100")
+        time.sleep(0.3)
+        log_fn(f"✅ Auto-click attempts completed!")
+        log_fn(f"💡 If SMS wasn't sent, manually tap send button in next {delay_seconds} seconds...")
+        for remaining in range(delay_seconds, 0, -1):
+            if stop_event.is_set():
+                break
+            if remaining <= 3:
+                log_fn(f"  ⏳ {remaining}...")
+            time.sleep(1)
+        adb("shell", "input keyevent 3")
+        time.sleep(0.5)
+        log_fn(f"✅ Moving to next contact")
+        return True
+    except Exception as e:
+        log_fn(f"❌ Failed to send SMS to {phone}: {e}")
+        return False
+
+# --- Messenger sending via Selenium ---
+def send_message_messenger(driver, username, message, log_fn, stop_event, attachment_path=None):
+    """
+    Send a Facebook Messenger message to a single username with optional attachment.
+    
+    Args:
+        driver: Selenium WebDriver instance
+        username: str, Facebook username or profile ID
+        message: str, text message to send
+        log_fn: callable, logging function
+        stop_event: threading.Event, used to stop execution gracefully
+        attachment_path: str, optional path to file to attach
+    
+    Returns:
+        bool, True if sent successfully, False otherwise
+    """
+    if stop_event.is_set():
+        log_fn("Stopped before sending.")
+        return False
+    
+    try:
+        wait = WebDriverWait(driver, WAIT_TIMEOUT)
+        short_wait = WebDriverWait(driver, FAST_WAIT)
+        actions = ActionChains(driver)
+        
+        # Navigate to chat
+        driver.get(f"https://www.messenger.com/t/{username}")
+        
+        # Wait for page to load
+        try:
+            short_wait.until(EC.presence_of_element_located((By.XPATH, "//h1 | //h2 | //div[contains(@class, 'x1lliihq')]")))
+        except Exception:
+            pass
+        
+        # Try clicking "Continue chatting" button if present
+        fast_sels = [
+            "//button[.//span[normalize-space()='Continue chatting']]",
+            "//button[normalize-space()='Continue chatting']",
+            "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'continue chatting')]"
+        ]
+        clicked = False
+        for sel in fast_sels:
+            if stop_event.is_set():
+                return False
+            try:
+                btn = short_wait.until(EC.element_to_be_clickable((By.XPATH, sel)))
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+                time.sleep(0.05)
+                actions.move_to_element(btn).click().perform()
+                clicked = True
+                break
+            except Exception:
+                continue
+        
+        if not clicked:
+            try:
+                fb = short_wait.until(EC.element_to_be_clickable((By.XPATH, "//div[@role='button' and contains(., 'Continue')]")))
+                actions.move_to_element(fb).click().perform()
+            except Exception:
+                pass
+        
+        time.sleep(POST_CLICK_WAIT)
+        
+        # Find message box
+        msg_sels = [
+            "//div[@role='textbox' and @contenteditable='true']",
+            "//div[@aria-label='Message' and @role='textbox']"
+        ]
+        msg_box = None
+        for sel in msg_sels:
+            if stop_event.is_set():
+                return False
+            try:
+                msg_box = short_wait.until(EC.element_to_be_clickable((By.XPATH, sel)))
+                break
+            except Exception:
+                continue
+        
+        if not msg_box:
+            log_fn(f"  ❌ No message box for {username}")
+            return False
+        
+        # Messenger doesn't support attachments via automation - text only
+        if attachment_path and os.path.exists(attachment_path):
+            log_fn(f"  ⚠️ Attachments not supported for Messenger platform")
+            log_fn(f"  📝 Sending text message only...")
+        
+        # Send text message
+        try:
+            msg_box.click()
+            time.sleep(0.15)
+            actions.move_to_element(msg_box).click().key_down("\ue009").send_keys("a").key_up("\ue009").send_keys("\b").perform()
+        except Exception:
+            pass
+        
+        # Send message with proper line break handling (like WhatsApp)
+        try:
+            msg_box.click()
+            time.sleep(0.3)
+            
+            # Split message by lines and send with proper formatting
+            lines = message.split('\n')
+            for i, line in enumerate(lines):
+                if line.strip():  # Only send non-empty lines
+                    msg_box.send_keys(line)
+                # Add line break except for the last line
+                if i < len(lines) - 1:
+                    msg_box.send_keys(Keys.SHIFT + Keys.ENTER)
+            
+            time.sleep(0.5)
+            msg_box.send_keys(Keys.ENTER)
+            log_fn(f"✅ Messenger message sent to {username}")
+            return True
+        except Exception as e:
+            log_fn(f"  ❌ Send failed {username}: {e}")
+            return False
+    
+    except Exception as e:
+        log_fn(f"❌ Failed to send Messenger message to {username}: {e}")
+        return False
+
 # --- Global UI Components Storage ---
 attachment_entry = None
 email_config_section = None
@@ -427,6 +1102,38 @@ def update_ui_for_platform():
         if messenger_config_section:
             messenger_config_section.pack_forget()
 
+# ===============================================
+
+# --- Trial Expiration Check ---
+INSTALL_DATE = datetime.date(2025, 11, 26)
+TRIAL_DAYS = 7
+
+def check_trial_expiration():
+    today = datetime.date.today()
+    
+    days_used = (today - INSTALL_DATE).days
+    
+    if days_used > TRIAL_DAYS:
+        messagebox.showerror(
+            "Trial Expired",
+            f"Your {TRIAL_DAYS}-day trial has expired!\n\n"
+            f"First run / install date: {INSTALL_DATE}\n"
+            f"Days used: {days_used}\n\n"
+            "Contact the developer for the full version."
+        )
+        sys.exit(1)
+    
+    # Optional: friendly reminder when close to expiry
+    if days_used >= 5:
+        remaining = TRIAL_DAYS - days_used
+        messagebox.showwarning(
+            "Trial Almost Over",
+            f"You have only {remaining} day{'s' if remaining != 1 else ''} left!"
+        )
+
+# Put this at the very start of your app
+check_trial_expiration()
+
 # ================= MODERN REACTIVE GUI =================
 root = tk.Tk()
 root.title("🚀 growHigh - Bulk Sender (WhatsApp | Email | SMS | Messenger)")
@@ -445,7 +1152,6 @@ ACCENT_MAIN = "#58A6FF"
 ACCENT_GREEN = "#3FB950"
 ACCENT_RED = "#F85149"
 ACCENT_YELLOW = "#D29922"
-ACCENT_BLUE = "#79C0FF"
 HOVER_BG = "#21262D"
 BUTTON_HOVER = "#238636"
 
@@ -1339,10 +2045,6 @@ stop_btn = tk.Button(button_section, text="⏹  STOP", bg=ACCENT_RED, fg="white"
                     font=("Consolas", 11, "bold"), relief=tk.FLAT, bd=0, padx=30, pady=12, cursor="hand2")
 stop_btn.pack(side=tk.LEFT, padx=10, expand=True, fill=tk.X)
 
-download_btn = tk.Button(button_section, text="📥 DOWNLOAD FAILED", bg=ACCENT_BLUE, fg="white",
-                        font=("Consolas", 11, "bold"), relief=tk.FLAT, bd=0, padx=30, pady=12, cursor="hand2", state=tk.DISABLED)
-download_btn.pack(side=tk.LEFT, padx=10, expand=True, fill=tk.X)
-
 def on_start_enter(event):
     start_btn.config(bg=BUTTON_HOVER)
 
@@ -1355,18 +2057,10 @@ def on_stop_enter(event):
 def on_stop_leave(event):
     stop_btn.config(bg=ACCENT_RED)
 
-def on_download_enter(event):
-    download_btn.config(bg="#2563EB")
-
-def on_download_leave(event):
-    download_btn.config(bg=ACCENT_BLUE)
-
 start_btn.bind("<Enter>", on_start_enter)
 start_btn.bind("<Leave>", on_start_leave)
 stop_btn.bind("<Enter>", on_stop_enter)
 stop_btn.bind("<Leave>", on_stop_leave)
-download_btn.bind("<Enter>", on_download_enter)
-download_btn.bind("<Leave>", on_download_leave)
 
 # ===== SECTION 4: ACTIVITY LOG =====
 section3 = tk.Frame(content_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
@@ -1424,20 +2118,6 @@ def log(msg):
 
 # stop event for threads
 stop_event = threading.Event()
-
-# Global variable to store failed CSV path
-failed_csv_path = None
-
-def download_failed_csv():
-    global failed_csv_path
-    if failed_csv_path and os.path.exists(failed_csv_path):
-        try:
-            os.startfile(failed_csv_path)  # Windows
-            log(f"📂 Opened failed contacts CSV: {failed_csv_path}")
-        except Exception as e:
-            log(f"❌ Could not open failed CSV: {e}")
-    else:
-        messagebox.showinfo("No Failed Contacts", "No failed contacts CSV available. Run a campaign first.")
 
 # Worker thread
 def start_sending():
@@ -1529,7 +2209,6 @@ def start_sending():
 
         # Extract contacts based on platform
         rows = []
-        row_mapping = {}  # Map processed contact to original row data
         
         if platform == "Email":
             # Email mode: look for email column
@@ -1567,7 +2246,6 @@ def start_sending():
                     personalized_msg = message.replace("{{name}}", name).replace("{name}", name)
                     personalized_msg = f"Hello {name},\n\n{personalized_msg}"
                     rows.append((email_raw, personalized_msg, name))
-                    row_mapping[email_raw] = r.to_dict()
             else:
                 # Fallback: use first column as email
                 first_col = df.columns[0]
@@ -1592,7 +2270,6 @@ def start_sending():
                     personalized_msg = message.replace("{{name}}", name).replace("{name}", name)
                     personalized_msg = f"Hello {name},\n\n{personalized_msg}"
                     rows.append((email_raw, personalized_msg, name))
-                    row_mapping[email_raw] = r.to_dict()
         
         elif platform == "Messenger":
             # Messenger mode: look for username column
@@ -1631,7 +2308,6 @@ def start_sending():
                     personalized_msg = message.replace("{{name}}", name).replace("{name}", name)
                     personalized_msg = f"Hello {username_raw},\n\n{personalized_msg}"
                     rows.append((username_raw, personalized_msg, username_raw))
-                    row_mapping[username_raw] = r.to_dict()
             else:
                 # Fallback: use first column as username
                 first_col = df.columns[0]
@@ -1658,7 +2334,6 @@ def start_sending():
                     personalized_msg = message.replace("{{name}}", name).replace("{name}", name)
                     personalized_msg = f"Hello {username_raw},\n\n{personalized_msg}"
                     rows.append((username_raw, personalized_msg, username_raw))
-                    row_mapping[username_raw] = r.to_dict()
         
         else:
             # WhatsApp/SMS mode: look for phone column
@@ -1702,7 +2377,6 @@ def start_sending():
                             # Normal message with greeting
                             personalized_msg = f"Hello {name},\n\n{message}"
                         rows.append((phone_clean, personalized_msg, name))
-                        row_mapping[phone_clean] = r.to_dict()
                     else:
                         log(f"⚠️ Skipping invalid phone: {phone_raw}")
             else:
@@ -1736,7 +2410,6 @@ def start_sending():
                             # Normal message with greeting
                             personalized_msg = f"Hello {name},\n\n{message}"
                         rows.append((phone_clean, personalized_msg, name))
-                        row_mapping[phone_clean] = r.to_dict()
                     else:
                         log(f"⚠️ Skipping invalid phone: {phone_raw}")
 
@@ -1802,7 +2475,6 @@ def start_sending():
 
         sent_count = 0
         failed_list = []
-        failed_rows = []  # Store original row data for failed contacts
         
         # Sending loop based on platform
         if platform == "Email":
@@ -1823,12 +2495,10 @@ def start_sending():
                         stats_sent.config(text=str(sent_count))
                     else:
                         failed_list.append(target_email)
-                        failed_rows.append(row_mapping[target_email])
                         stats_failed.config(text=str(len(failed_list)))
                 except Exception as e:
                     log(f"  ❌ ERROR {target_email}: {e}")
                     failed_list.append(target_email)
-                    failed_rows.append(row_mapping[target_email])
                     stats_failed.config(text=str(len(failed_list)))
                 
                 if stop_event.is_set():
@@ -1868,12 +2538,10 @@ def start_sending():
                         stats_sent.config(text=str(sent_count))
                     else:
                         failed_list.append(target_phone)
-                        failed_rows.append(row_mapping[target_phone])
                         stats_failed.config(text=str(len(failed_list)))
                 except Exception as e:
                     log(f"  ❌ ERROR {target_phone}: {e}")
                     failed_list.append(target_phone)
-                    failed_rows.append(row_mapping[target_phone])
                     stats_failed.config(text=str(len(failed_list)))
                 
                 if stop_event.is_set():
@@ -1897,12 +2565,10 @@ def start_sending():
                         stats_sent.config(text=str(sent_count))
                     else:
                         failed_list.append(target_username)
-                        failed_rows.append(row_mapping[target_username])
                         stats_failed.config(text=str(len(failed_list)))
                 except Exception as e:
                     log(f"  ❌ ERROR {target_username}: {e}")
                     failed_list.append(target_username)
-                    failed_rows.append(row_mapping[target_username])
                     stats_failed.config(text=str(len(failed_list)))
                 
                 # Short delay between messages
@@ -1951,12 +2617,10 @@ def start_sending():
                         stats_sent.config(text=str(sent_count))
                     else:
                         failed_list.append(target_phone)
-                        failed_rows.append(row_mapping[target_phone])
                         stats_failed.config(text=str(len(failed_list)))
                 except Exception as e:
                     log(f"  ❌ ERROR {target_phone}: {e}")
                     failed_list.append(target_phone)
-                    failed_rows.append(row_mapping[target_phone])
                     stats_failed.config(text=str(len(failed_list)))
                 
                 # Delay is now handled inside send_message_whatsapp function with countdown
@@ -1967,16 +2631,6 @@ def start_sending():
         log(f"✅ COMPLETE: {sent_count}/{len(rows)} sent | ❌ Failed: {len(failed_list)}")
         if failed_list:
             log("📌 Failed contacts: " + ", ".join(failed_list[:5]))
-            
-            # Create failed contacts CSV
-            if failed_rows:
-                global failed_csv_path
-                failed_df = pd.DataFrame(failed_rows)
-                failed_csv_path = csv_path.replace('.csv', '_failed.csv')
-                failed_df.to_csv(failed_csv_path, index=False)
-                log(f"💾 Failed contacts saved to: {failed_csv_path}")
-                log(f"📊 Failed CSV contains {len(failed_rows)} rows with {len(failed_df.columns)} columns")
-                download_btn.config(state=tk.NORMAL)
         
         if platform in ["WhatsApp", "Messenger"]:
             try:
@@ -1995,7 +2649,6 @@ def stop_sending():
 
 start_btn.config(command=start_sending)
 stop_btn.config(command=stop_sending)
-download_btn.config(command=download_failed_csv)
 
 log("🎉 App ready – select CSV, type message, and click START SENDING")
-root.mainloop() 
+root.mainloop()
