@@ -80,9 +80,8 @@ except ImportError:
 
 # ==================== CONFIG ====================
 
-PROFILE_DIR = os.path.join(os.path.expanduser("~"), ".automessenger", "chrome_profile")
+PROFILE_DIR = os.path.join(os.getenv("APPDATA"), "AutoMessenger", "chrome_profile")
 os.makedirs(PROFILE_DIR, exist_ok=True)
-
 
 HEADLESS = False
 MIN_DELAY = 3
