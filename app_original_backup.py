@@ -80,8 +80,14 @@ except ImportError:
 
 # ==================== CONFIG ====================
 
-PROFILE_DIR = os.path.join(os.getenv("APPDATA"), "AutoMessenger", "chrome_profile")
+# Cross-platform profile directory
+if os.name == 'nt':  # Windows
+    PROFILE_DIR = os.path.join(os.getenv("APPDATA"), "AutoMessenger", "chrome_profile")
+else:  # Linux/Mac
+    PROFILE_DIR = os.path.join(os.path.expanduser("~"), ".config", "AutoMessenger", "chrome_profile")
 os.makedirs(PROFILE_DIR, exist_ok=True)
+
+print("Profile directory:", PROFILE_DIR)
 
 HEADLESS = False
 MIN_DELAY = 3

@@ -45,3 +45,7 @@ dist/
 
 
 *.exe
+*.pyd
+chrome_profile/
+.venv/
+.env
