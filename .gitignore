@@ -43,9 +43,14 @@ build/
 dist/
 *.egg-info/
 
-
+# PyInstaller build artifacts
+*.spec
+*.manifest
 *.exe
 *.pyd
+
+# Application-specific
 chrome_profile/
 .venv/
 .env
+install_date.txt
