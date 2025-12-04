@@ -1,4 +1,23 @@
+
 # auto_messenger_ultra_fast.py
+
+# ===== CRITICAL: Prevent segmentation faults on Linux =====
+import os
+import sys
+
+# Set environment variables BEFORE any GUI or browser imports
+os.environ['QT_QPA_PLATFORM'] = 'offscreen'  # Prevent Qt conflicts
+os.environ['PYDEVD_DISABLE_FILE_VALIDATION'] = '1'  # Prevent debugger issues
+
+# Prevent Tkinter threading issues
+os.environ['TK_SILENCE_DEPRECATION'] = '1'
+
+# Chrome/Chromium stability
+os.environ['CHROME_DEVEL_SANDBOX'] = '/usr/local/sbin/chrome-devel-sandbox'
+os.environ['DBUS_SESSION_BUS_ADDRESS'] = os.environ.get('DBUS_SESSION_BUS_ADDRESS', '/dev/null')
+
+# ===== End of critical environment setup =====
+
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -12,8 +31,6 @@ from webdriver_manager.chrome import ChromeDriverManager
 import pandas as pd
 import time
 import random
-import os
-import sys
 import subprocess
 import shutil
 import time
@@ -29,9 +46,8 @@ from email import encoders
 import re
 import datetime
 
-import undetected_chromedriver as uc
-import requests
-import json
+# import undetected_chromedriver as uc  <-- Moved to create_driver to prevent SegFault
+
 
 # --- Robust ADB Detection and Installation ---
 def check_and_install_adb():
@@ -116,6 +132,9 @@ def extract_phone_digits(phone_str):
 
 
 def create_driver(profile_dir=PROFILE_DIR, headless=HEADLESS):
+    # Lazy import to prevent SegFault on Linux startup
+    import undetected_chromedriver as uc
+    
     # Make sure profile directory exists
     os.makedirs(profile_dir, exist_ok=True)
 
@@ -131,69 +150,30 @@ def create_driver(profile_dir=PROFILE_DIR, headless=HEADLESS):
     # Avoid anti-detection flags like disable-blink-features!
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    
+    # Additional stability options for Linux
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-software-rasterizer")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-setuid-sandbox")
+    
+    # Prevent crashes on Linux
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--remote-debugging-port=9222")
 
-    # Create real undetected Chrome
-    driver = uc.Chrome(options=options)
-
-    return driver
-
-
-# --- Green API Helper Functions ---
-def validate_green_api_credentials(instance_id, api_token, api_url):
-    """Check if Green API credentials are valid."""
     try:
-        url = f"{api_url}/waInstance{instance_id}/getStateInstance/{api_token}"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            state = data.get('stateInstance')
-            return True, state
-        else:
-            return False, f"HTTP {response.status_code}: {response.text}"
+        # Create real undetected Chrome
+        driver = uc.Chrome(options=options, use_subprocess=False)
+        return driver
     except Exception as e:
-        return False, str(e)
-
-def send_message_greenapi(phone, message, instance_id, api_token, api_url):
-    """Send text message via Green API."""
-    try:
-        phone = extract_phone_digits(phone)
-        if not phone: return False, "Invalid phone number"
-        
-        chat_id = f"{phone}@c.us"
-        url = f"{api_url}/waInstance{instance_id}/sendMessage/{api_token}"
-        payload = {"chatId": chat_id, "message": message}
-        
-        response = requests.post(url, json=payload, timeout=30)
-        if response.status_code == 200:
-            return True, response.json().get('idMessage', 'N/A')
-        else:
-            return False, f"HTTP {response.status_code}"
-    except Exception as e:
-        return False, str(e)
-
-def send_file_greenapi(phone, file_path, caption, instance_id, api_token, media_url):
-    """Send file via Green API."""
-    try:
-        if not os.path.exists(file_path): return False, "File not found"
-        
-        phone = extract_phone_digits(phone)
-        if not phone: return False, "Invalid phone number"
-        
-        chat_id = f"{phone}@c.us"
-        file_name = os.path.basename(file_path)
-        url = f"{media_url}/waInstance{instance_id}/sendFileByUpload/{api_token}"
-        
-        with open(file_path, 'rb') as f:
-            files = {'file': (file_name, f, 'application/octet-stream')}
-            data = {'chatId': chat_id, 'caption': caption if caption else ''}
-            response = requests.post(url, files=files, data=data, timeout=120)
-            
-        if response.status_code == 200:
-            return True, response.json().get('idMessage', 'N/A')
-        else:
-            return False, f"HTTP {response.status_code}"
-    except Exception as e:
-        return False, str(e)
+        print(f"Error creating driver: {e}")
+        # Fallback: try with version_main parameter
+        try:
+            driver = uc.Chrome(options=options, version_main=None, use_subprocess=False)
+            return driver
+        except Exception as e2:
+            print(f"Fallback also failed: {e2}")
+            raise
 
 
 # --- Messaging actions (WhatsApp with attachment support) ---
@@ -789,6 +769,203 @@ def send_message_whatsapp(driver, phone, message, log_fn, stop_event, attachment
         log_fn(f"❌ Failed to send WhatsApp to {phone}: {e}")
         return False
 
+# ==================== GREEN API INTEGRATION ====================
+# Green API functions for WhatsApp messaging via REST API
+# Documentation: https://green-api.com/en/docs/
+
+def send_message_greenapi(phone, message, instance_id, api_token, api_url, log_fn, stop_event):
+    """
+    Send a text message via Green API.
+    
+    Args:
+        phone: str, phone number (with or without '+')
+        message: str, text message to send
+        instance_id: str, Green API instance ID
+        api_token: str, Green API token
+        api_url: str, Green API base URL (e.g., https://7105.api.green-api.com)
+        log_fn: callable, logging function
+        stop_event: threading.Event, used to stop execution gracefully
+    
+    Returns:
+        bool, True if sent successfully, False otherwise
+    """
+    if stop_event.is_set():
+        log_fn("Stopped before sending.")
+        return False
+    
+    try:
+        import requests
+        
+        # Format phone number
+        phone = extract_phone_digits(phone)
+        if not phone:
+            log_fn("❌ Empty phone number, skipping.")
+            return False
+        
+        # Green API expects format: countrycode + number + @c.us
+        # Example: 9779803661701@c.us
+        chat_id = f"{phone}@c.us"
+        
+        # API endpoint using custom URL
+        url = f"{api_url}/waInstance{instance_id}/sendMessage/{api_token}"
+        
+        # Request payload
+        payload = {
+            "chatId": chat_id,
+            "message": message
+        }
+        
+        log_fn(f"📤 Sending message to {phone} via Green API...")
+        
+        # Send request
+        response = requests.post(url, json=payload, timeout=30)
+        
+        if response.status_code == 200:
+            result = response.json()
+            log_fn(f"✅ Message sent successfully to {phone}")
+            log_fn(f"  📋 Message ID: {result.get('idMessage', 'N/A')}")
+            return True
+        else:
+            log_fn(f"❌ Failed to send message to {phone}")
+            log_fn(f"  HTTP {response.status_code}: {response.text[:200]}")
+            return False
+            
+    except Exception as e:
+        log_fn(f"❌ Error sending to {phone}: {str(e)[:100]}")
+        return False
+
+
+def send_file_greenapi(phone, file_path, caption, instance_id, api_token, media_url, log_fn, stop_event):
+    """
+    Send a file with optional caption via Green API.
+    
+    Args:
+        phone: str, phone number (with or without '+')
+        file_path: str, path to file to send
+        caption: str, optional caption for the file
+        instance_id: str, Green API instance ID
+        api_token: str, Green API token
+        media_url: str, Green API media URL (e.g., https://7105.media.green-api.com)
+        log_fn: callable, logging function
+        stop_event: threading.Event, used to stop execution gracefully
+    
+    Returns:
+        bool, True if sent successfully, False otherwise
+    """
+    if stop_event.is_set():
+        log_fn("Stopped before sending.")
+        return False
+    
+    try:
+        import requests
+        
+        # Validate file exists
+        if not os.path.exists(file_path):
+            log_fn(f"❌ File not found: {file_path}")
+            return False
+        
+        # Format phone number
+        phone = extract_phone_digits(phone)
+        if not phone:
+            log_fn("❌ Empty phone number, skipping.")
+            return False
+        
+        # Green API expects format: countrycode + number + @c.us
+        chat_id = f"{phone}@c.us"
+        
+        # Get file info
+        file_name = os.path.basename(file_path)
+        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+        
+        log_fn(f"📎 Sending file to {phone} via Green API...")
+        log_fn(f"  📦 File: {file_name} ({file_size_mb:.1f}MB)")
+        
+        # API endpoint for file upload using media URL
+        url = f"{media_url}/waInstance{instance_id}/sendFileByUpload/{api_token}"
+        
+        # Prepare multipart form data
+        with open(file_path, 'rb') as f:
+            files = {
+                'file': (file_name, f, 'application/octet-stream')
+            }
+            
+            data = {
+                'chatId': chat_id,
+                'caption': caption if caption else ''
+            }
+            
+            # Send request
+            log_fn(f"  📤 Uploading file...")
+            response = requests.post(url, files=files, data=data, timeout=120)
+        
+        if response.status_code == 200:
+            result = response.json()
+            log_fn(f"✅ File sent successfully to {phone}")
+            log_fn(f"  📋 Message ID: {result.get('idMessage', 'N/A')}")
+            return True
+        else:
+            log_fn(f"❌ Failed to send file to {phone}")
+            log_fn(f"  HTTP {response.status_code}: {response.text[:200]}")
+            return False
+            
+    except Exception as e:
+        log_fn(f"❌ Error sending file to {phone}: {str(e)[:100]}")
+        return False
+
+
+def send_message_greenapi_unified(phone, message, instance_id, api_token, api_url, media_url, log_fn, stop_event, 
+                                   attachment_path=None, delay_seconds=60):
+    """
+    Unified function to send WhatsApp message via Green API (text or file).
+    
+    Args:
+        phone: str, phone number (with or without '+')
+        message: str, text message to send (or caption if file attached)
+        instance_id: str, Green API instance ID
+        api_token: str, Green API token
+        api_url: str, Green API base URL
+        media_url: str, Green API media URL
+        log_fn: callable, logging function
+        stop_event: threading.Event, used to stop execution gracefully
+        attachment_path: str, optional path to file to attach
+        delay_seconds: int, number of seconds to wait after sending
+    
+    Returns:
+        bool, True if sent successfully, False otherwise
+    """
+    if stop_event.is_set():
+        log_fn("Stopped before sending.")
+        return False
+    
+    try:
+        # Send file with caption if attachment provided
+        if attachment_path and os.path.exists(attachment_path):
+            success = send_file_greenapi(phone, attachment_path, message, 
+                                        instance_id, api_token, media_url, log_fn, stop_event)
+        # Send text message only
+        elif message and message.strip():
+            success = send_message_greenapi(phone, message, 
+                                          instance_id, api_token, api_url, log_fn, stop_event)
+        else:
+            log_fn(f"⚠️ No message or attachment to send for {phone}")
+            return False
+        
+        if success:
+            # Delay before next message
+            for remaining in range(delay_seconds, 0, -1):
+                if stop_event.is_set():
+                    break
+                if remaining % 10 == 0 or remaining <= 5:
+                    log_fn(f"  ⏳ Waiting {remaining} seconds before next message...")
+                time.sleep(1)
+        
+        return success
+        
+    except Exception as e:
+        log_fn(f"❌ Error in Green API unified send: {str(e)[:100]}")
+        return False
+
+
 # --- Email sending via SMTP with attachment support ---
 def send_email_smtp(email_to, subject, body, sender_email, sender_password, log_fn, stop_event, attachment_path=None):
     """
@@ -1131,64 +1308,65 @@ def send_message_messenger(driver, username, message, log_fn, stop_event, attach
         log_fn(f"❌ Failed to send Messenger message to {username}: {e}")
         return False
 
+# ====================GUI CODE STARTS HERE ====================
 # --- Global UI Components Storage ---
 attachment_entry = None
 email_config_section = None
 sms_config_section = None
 messenger_config_section = None
-greenapi_config_section = None
+whatsapp_config_section = None
 platform_var = None
 
 def update_ui_for_platform():
     """Show/hide UI elements based on selected platform"""
-    global email_config_section, sms_config_section, messenger_config_section, greenapi_config_section
+    global email_config_section, sms_config_section, messenger_config_section, whatsapp_config_section
     platform = platform_var.get()
     
-    if platform == "Email":
-        email_config_section.pack(fill=tk.X, pady=12, after=section_platform)
+    if platform == "WhatsApp":
+        if whatsapp_config_section:
+            whatsapp_config_section.pack(fill=tk.X, pady=12, after=section_platform)
+        email_config_section.pack_forget()
         if sms_config_section:
             sms_config_section.pack_forget()
         if messenger_config_section:
             messenger_config_section.pack_forget()
-        if greenapi_config_section:
-            greenapi_config_section.pack_forget()
+    elif platform == "Email":
+        email_config_section.pack(fill=tk.X, pady=12, after=section_platform)
+        if whatsapp_config_section:
+            whatsapp_config_section.pack_forget()
+        if sms_config_section:
+            sms_config_section.pack_forget()
+        if messenger_config_section:
+            messenger_config_section.pack_forget()
     elif platform == "SMS":
         if sms_config_section:
             sms_config_section.pack(fill=tk.X, pady=12, after=section_platform)
+        if whatsapp_config_section:
+            whatsapp_config_section.pack_forget()
         email_config_section.pack_forget()
         if messenger_config_section:
             messenger_config_section.pack_forget()
-        if greenapi_config_section:
-            greenapi_config_section.pack_forget()
     elif platform == "Messenger":
         if messenger_config_section:
             messenger_config_section.pack(fill=tk.X, pady=12, after=section_platform)
+        if whatsapp_config_section:
+            whatsapp_config_section.pack_forget()
         email_config_section.pack_forget()
         if sms_config_section:
             sms_config_section.pack_forget()
-        if greenapi_config_section:
-            greenapi_config_section.pack_forget()
-    elif platform == "GreenAPI":
-        if greenapi_config_section:
-            greenapi_config_section.pack(fill=tk.X, pady=12, after=section_platform)
-        email_config_section.pack_forget()
-        if sms_config_section:
-            sms_config_section.pack_forget()
-        if messenger_config_section:
-            messenger_config_section.pack_forget()
     else:
+        if whatsapp_config_section:
+            whatsapp_config_section.pack_forget()
         email_config_section.pack_forget()
         if sms_config_section:
             sms_config_section.pack_forget()
         if messenger_config_section:
             messenger_config_section.pack_forget()
-        if greenapi_config_section:
-            greenapi_config_section.pack_forget()
 
 # ===============================================
 
 # --- Trial Expiration Check ---
-INSTALL_DATE = datetime.date(2025, 12, 5)
+INSTALL_DATE = datetime.date(2025, 11, 26)
 TRIAL_DAYS = 7
 
 def check_trial_expiration():
@@ -1214,11 +1392,20 @@ def check_trial_expiration():
             f"You have only {remaining} day{'s' if remaining != 1 else ''} left!"
         )
 
-# Put this at the very start of your app
+# ================= MODERN REACTIVE GUI =================
+try:
+    root = tk.Tk()
+except Exception as e:
+    print(f"ERROR: Failed to initialize Tkinter GUI: {e}")
+    print("This usually happens when:")
+    print("1. No display server is available (try: export DISPLAY=:0)")
+    print("2. Missing X11 libraries (try: sudo apt-get install python3-tk)")
+    print("3. Running in SSH without X forwarding (try: ssh -X)")
+    sys.exit(1)
+
+# Check trial AFTER initializing root to prevent SegFault
 check_trial_expiration()
 
-# ================= MODERN REACTIVE GUI =================
-root = tk.Tk()
 root.title("🚀 growHigh - Bulk Sender (WhatsApp | Email | SMS | Messenger)")
 root.geometry("1000x950")
 root.resizable(True, True)
@@ -1707,7 +1894,7 @@ def on_platform_change(*args):
 
 platform_var.trace('w', on_platform_change)
 
-platforms = ["WhatsApp", "GreenAPI", "Email", "SMS", "Messenger"]
+platforms = ["WhatsApp", "Email", "SMS", "Messenger"]
 for platform in platforms:
     platform_rb = tk.Radiobutton(
         platform_frame, text=f"  {platform}",
@@ -1794,6 +1981,100 @@ def on_country_change(event=None):
     log(f"🌍 Country code changed to: {code}")
 
 country_code_dropdown.bind("<<ComboboxSelected>>", on_country_change)
+
+# ===== SECTION 0.4: WHATSAPP CONFIGURATION (Hidden by default) =====
+whatsapp_config_section = tk.Frame(content_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
+
+whatsapp_config_section.bind("<Enter>", lambda e: on_section_enter(e, whatsapp_config_section))
+whatsapp_config_section.bind("<Leave>", lambda e: on_section_leave(e, whatsapp_config_section))
+
+s_whatsapp_header = tk.Frame(whatsapp_config_section, bg=CARD_BG)
+s_whatsapp_header.pack(fill=tk.X, padx=20, pady=(15, 10))
+tk.Label(s_whatsapp_header, text="💬", font=("Arial", 18), bg=CARD_BG, fg=ACCENT_GREEN).pack(side=tk.LEFT, padx=(0, 10))
+tk.Label(s_whatsapp_header, text="WhatsApp Method Selection", font=FONT_LABEL, bg=CARD_BG, fg=FG_PRIMARY).pack(side=tk.LEFT)
+tk.Label(s_whatsapp_header, text="Choose between WebDriver or Green API", font=("Consolas", 8), bg=CARD_BG, fg=FG_SECONDARY).pack(anchor=tk.W, pady=(5, 0))
+
+whatsapp_method_frame = tk.Frame(whatsapp_config_section, bg=CARD_BG)
+whatsapp_method_frame.pack(fill=tk.X, padx=20, pady=(10, 5))
+
+# Method selection radio buttons
+whatsapp_method_var = tk.StringVar(value="webdriver")
+
+tk.Label(whatsapp_method_frame, text="📡 Sending Method:", font=FONT_TEXT, bg=CARD_BG, fg=FG_PRIMARY).pack(anchor=tk.W, pady=(0, 5))
+
+method_radio_frame = tk.Frame(whatsapp_method_frame, bg=CARD_BG)
+method_radio_frame.pack(fill=tk.X, pady=(0, 10))
+
+webdriver_rb = tk.Radiobutton(
+    method_radio_frame, text="  🌐 WebDriver (Browser Automation)",
+    variable=whatsapp_method_var, value="webdriver",
+    bg=CARD_BG, fg=FG_PRIMARY, selectcolor=BG_SECONDARY,
+    activebackground=HOVER_BG, activeforeground=ACCENT_GREEN,
+    font=FONT_TEXT, highlightthickness=0
+)
+webdriver_rb.pack(side=tk.LEFT, padx=10, pady=5)
+
+greenapi_rb = tk.Radiobutton(
+    method_radio_frame, text="  🚀 Green API (REST API)",
+    variable=whatsapp_method_var, value="greenapi",
+    bg=CARD_BG, fg=FG_PRIMARY, selectcolor=BG_SECONDARY,
+    activebackground=HOVER_BG, activeforeground=ACCENT_GREEN,
+    font=FONT_TEXT, highlightthickness=0
+)
+greenapi_rb.pack(side=tk.LEFT, padx=10, pady=5)
+
+# Green API credentials section (shown only when Green API is selected)
+greenapi_credentials_frame = tk.Frame(whatsapp_config_section, bg=CARD_BG)
+
+tk.Label(greenapi_credentials_frame, text="🔑 Green API Credentials:", font=FONT_TEXT, bg=CARD_BG, fg=ACCENT_YELLOW).pack(anchor=tk.W, pady=(10, 5))
+
+# Instance ID
+tk.Label(greenapi_credentials_frame, text="Instance ID (idInstance):", font=("Consolas", 9), bg=CARD_BG, fg=FG_PRIMARY).pack(anchor=tk.W, pady=(5, 3))
+greenapi_instance_entry = tk.Entry(greenapi_credentials_frame, bg=HOVER_BG, fg=FG_PRIMARY, font=FONT_TEXT, relief=tk.FLAT, bd=0, insertbackground=ACCENT_GREEN)
+greenapi_instance_entry.pack(fill=tk.X, ipady=6, pady=(0, 10))
+greenapi_instance_entry.insert(0, "7105402179")
+
+# API Token
+tk.Label(greenapi_credentials_frame, text="API Token (apiTokenInstance):", font=("Consolas", 9), bg=CARD_BG, fg=FG_PRIMARY).pack(anchor=tk.W, pady=(0, 3))
+greenapi_token_entry = tk.Entry(greenapi_credentials_frame, bg=HOVER_BG, fg=FG_PRIMARY, font=FONT_TEXT, relief=tk.FLAT, bd=0, insertbackground=ACCENT_GREEN, show="*")
+greenapi_token_entry.pack(fill=tk.X, ipady=6, pady=(0, 10))
+greenapi_token_entry.insert(0, "")
+
+# API URL
+tk.Label(greenapi_credentials_frame, text="API URL:", font=("Consolas", 9), bg=CARD_BG, fg=FG_PRIMARY).pack(anchor=tk.W, pady=(0, 3))
+greenapi_url_entry = tk.Entry(greenapi_credentials_frame, bg=HOVER_BG, fg=FG_PRIMARY, font=FONT_TEXT, relief=tk.FLAT, bd=0, insertbackground=ACCENT_GREEN)
+greenapi_url_entry.pack(fill=tk.X, ipady=6, pady=(0, 10))
+greenapi_url_entry.insert(0, "https://7105.api.green-api.com")
+
+# Media URL
+tk.Label(greenapi_credentials_frame, text="Media URL:", font=("Consolas", 9), bg=CARD_BG, fg=FG_PRIMARY).pack(anchor=tk.W, pady=(0, 3))
+greenapi_media_url_entry = tk.Entry(greenapi_credentials_frame, bg=HOVER_BG, fg=FG_PRIMARY, font=FONT_TEXT, relief=tk.FLAT, bd=0, insertbackground=ACCENT_GREEN)
+greenapi_media_url_entry.pack(fill=tk.X, ipady=6, pady=(0, 10))
+greenapi_media_url_entry.insert(0, "https://7105.media.green-api.com")
+
+# Info label
+greenapi_info_label = tk.Label(greenapi_credentials_frame, 
+                          text="ℹ️ Get your credentials from https://green-api.com/\n" + 
+                               "💡 Green API is faster and doesn't require browser login\n" +
+                               "⚡ Supports text messages and file attachments\n" +
+                               "📝 Instance Name: Instance 7105402179",
+                          font=("Consolas", 8), bg=CARD_BG, fg=ACCENT_GREEN, justify=tk.LEFT)
+greenapi_info_label.pack(anchor=tk.W, pady=(5, 10))
+
+# Function to show/hide Green API credentials based on method selection
+def update_whatsapp_method():
+    method = whatsapp_method_var.get()
+    if method == "greenapi":
+        greenapi_credentials_frame.pack(fill=tk.X, padx=20, pady=(0, 15))
+        log("🚀 Green API method selected - Enter your credentials above")
+    else:
+        greenapi_credentials_frame.pack_forget()
+        log("🌐 WebDriver method selected - Browser will open for WhatsApp Web")
+
+whatsapp_method_var.trace('w', lambda *args: update_whatsapp_method())
+
+# Initially hide credentials (WebDriver is default)
+# greenapi_credentials_frame is not packed initially
 
 # ===== SECTION 0.5: EMAIL CREDENTIALS (Hidden by default) =====
 email_config_section = tk.Frame(content_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
@@ -1919,85 +2200,6 @@ messenger_info_label = tk.Label(messenger_input_frame,
                                "⚡ Messages will be sent automatically after login",
                           font=("Consolas", 8), bg=CARD_BG, fg=ACCENT_GREEN, justify=tk.LEFT)
 messenger_info_label.pack(anchor=tk.W, pady=(5, 10))
-
-# ===== SECTION 0.8: GREEN API CONFIGURATION (Hidden by default) =====
-greenapi_config_section = tk.Frame(content_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
-
-greenapi_config_section.bind("<Enter>", lambda e: on_section_enter(e, greenapi_config_section))
-greenapi_config_section.bind("<Leave>", lambda e: on_section_leave(e, greenapi_config_section))
-
-s_greenapi_header = tk.Frame(greenapi_config_section, bg=CARD_BG)
-s_greenapi_header.pack(fill=tk.X, padx=20, pady=(15, 10))
-tk.Label(s_greenapi_header, text="🌿", font=("Arial", 18), bg=CARD_BG, fg=ACCENT_GREEN).pack(side=tk.LEFT, padx=(0, 10))
-tk.Label(s_greenapi_header, text="Green API (WhatsApp)", font=FONT_LABEL, bg=CARD_BG, fg=FG_PRIMARY).pack(side=tk.LEFT)
-tk.Label(s_greenapi_header, text="Send WhatsApp messages without browser automation", font=("Consolas", 8), bg=CARD_BG, fg=FG_SECONDARY).pack(anchor=tk.W, pady=(5, 0))
-
-greenapi_input_frame = tk.Frame(greenapi_config_section, bg=CARD_BG)
-greenapi_input_frame.pack(fill=tk.X, padx=20, pady=(10, 5))
-
-# Grid layout for Green API inputs
-ga_grid = tk.Frame(greenapi_input_frame, bg=CARD_BG)
-ga_grid.pack(fill=tk.X)
-
-# Instance ID
-tk.Label(ga_grid, text="Instance ID:", font=FONT_TEXT, bg=CARD_BG, fg=FG_PRIMARY).grid(row=0, column=0, sticky="w", padx=(0, 10), pady=5)
-entry_instance = tk.Entry(ga_grid, bg=HOVER_BG, fg=FG_PRIMARY, font=FONT_TEXT, relief=tk.FLAT, bd=0, insertbackground=ACCENT_GREEN, width=25)
-entry_instance.insert(0, "7105402179")
-entry_instance.grid(row=0, column=1, sticky="ew", padx=(0, 20), pady=5)
-
-# API Token
-tk.Label(ga_grid, text="API Token:", font=FONT_TEXT, bg=CARD_BG, fg=FG_PRIMARY).grid(row=0, column=2, sticky="w", padx=(0, 10), pady=5)
-entry_token = tk.Entry(ga_grid, bg=HOVER_BG, fg=FG_PRIMARY, font=FONT_TEXT, relief=tk.FLAT, bd=0, insertbackground=ACCENT_GREEN, show="*", width=35)
-entry_token.grid(row=0, column=3, sticky="ew", padx=0, pady=5)
-
-# API URL
-tk.Label(ga_grid, text="API URL:", font=FONT_TEXT, bg=CARD_BG, fg=FG_PRIMARY).grid(row=1, column=0, sticky="w", padx=(0, 10), pady=5)
-entry_api_url = tk.Entry(ga_grid, bg=HOVER_BG, fg=FG_PRIMARY, font=FONT_TEXT, relief=tk.FLAT, bd=0, insertbackground=ACCENT_GREEN, width=25)
-entry_api_url.insert(0, "https://7105.api.green-api.com")
-entry_api_url.grid(row=1, column=1, sticky="ew", padx=(0, 20), pady=5)
-
-# Media URL
-tk.Label(ga_grid, text="Media URL:", font=FONT_TEXT, bg=CARD_BG, fg=FG_PRIMARY).grid(row=1, column=2, sticky="w", padx=(0, 10), pady=5)
-entry_media_url = tk.Entry(ga_grid, bg=HOVER_BG, fg=FG_PRIMARY, font=FONT_TEXT, relief=tk.FLAT, bd=0, insertbackground=ACCENT_GREEN, width=35)
-entry_media_url.insert(0, "https://7105.media.green-api.com")
-entry_media_url.grid(row=1, column=3, sticky="ew", padx=0, pady=5)
-
-# Validate Button
-def check_greenapi_connection():
-    instance = entry_instance.get().strip()
-    token = entry_token.get().strip()
-    url = entry_api_url.get().strip()
-    
-    if not instance or not token:
-        messagebox.showwarning("Missing Info", "Please enter Instance ID and Token")
-        return
-        
-    log("🔄 Checking Green API connection...")
-    
-    def _check():
-        valid, state = validate_green_api_credentials(instance, token, url)
-        if valid:
-            log(f"✅ Green API Connected! State: {state}")
-            messagebox.showinfo("Success", f"Connected!\nState: {state}")
-        else:
-            log(f"❌ Green API Connection Failed: {state}")
-            messagebox.showerror("Error", f"Connection Failed:\n{state}")
-            
-    threading.Thread(target=_check, daemon=True).start()
-
-btn_validate_ga = tk.Button(greenapi_input_frame, text="🔌 CHECK CONNECTION", command=check_greenapi_connection,
-                           bg=ACCENT_MAIN, fg="#FFFFFF", font=("Consolas", 9, "bold"),
-                           relief=tk.FLAT, bd=0, padx=20, pady=8, cursor="hand2")
-btn_validate_ga.pack(anchor="e", pady=(15, 0))
-
-def on_validate_ga_enter(event):
-    btn_validate_ga.config(bg="#4A8DD6")
-
-def on_validate_ga_leave(event):
-    btn_validate_ga.config(bg=ACCENT_MAIN)
-
-btn_validate_ga.bind("<Enter>", on_validate_ga_enter)
-btn_validate_ga.bind("<Leave>", on_validate_ga_leave)
 
 # ===== SECTION 1: CSV FILE INPUT =====
 section1 = tk.Frame(content_frame, bg=CARD_BG, relief=tk.FLAT, bd=1, highlightbackground=CARD_BORDER, highlightthickness=1)
@@ -2596,20 +2798,28 @@ def start_sending():
         if attachment_path:
             log(f"📎 Attachment: {os.path.basename(attachment_path)}")
 
-        # Create driver for WhatsApp or Messenger
-        if platform in ["WhatsApp", "Messenger"]:
-            try:
-                log(f"🌐 Initializing Chrome browser...")
-                driver = create_driver()
-                log(f"✅ Browser started successfully")
-            except Exception as e:
-                log(f"❌ Browser startup failed: {e}")
-                import traceback
-                log(f"📋 Error details: {traceback.format_exc()[:300]}")
-                start_btn.config(state=tk.NORMAL)
-                return
 
-            if platform == "WhatsApp":
+        # Create driver for WhatsApp (WebDriver only) or Messenger
+        driver = None
+        if platform == "WhatsApp":
+            # Check if Green API is selected
+            whatsapp_method = whatsapp_method_var.get()
+            if whatsapp_method == "greenapi":
+                log("🚀 Using Green API - No browser needed")
+                # Skip driver creation for Green API
+            else:
+                # WebDriver method - create browser
+                try:
+                    log(f"🌐 Initializing Chrome browser...")
+                    driver = create_driver()
+                    log(f"✅ Browser started successfully")
+                except Exception as e:
+                    log(f"❌ Browser startup failed: {e}")
+                    import traceback
+                    log(f"📋 Error details: {traceback.format_exc()[:300]}")
+                    start_btn.config(state=tk.NORMAL)
+                    return
+
                 # Open WhatsApp Web
                 log("🌐 Opening WhatsApp Web...")
                 try:
@@ -2621,19 +2831,33 @@ def start_sending():
                     start_btn.config(state=tk.NORMAL)
                     return
                 
-                time.sleep(2)
-                if "web.whatsapp.com" in driver.current_url and "qr" in driver.page_source.lower():
+                # Wait for login
+                try:
                     log("📱 Please scan QR code in WhatsApp Web. Waiting 20s...")
                     time.sleep(20)
-                else:
                     log("✅ Already logged in to WhatsApp Web")
-            elif platform == "Messenger":
-                # Open Messenger
-                driver.get("https://www.messenger.com")
-                time.sleep(2)
-                if "login" in driver.current_url.lower():
-                    log("📱 Please log in to Facebook Messenger. Waiting 20s...")
-                    time.sleep(20)
+                except:
+                    pass
+        
+        elif platform == "Messenger":
+            # Messenger always needs browser
+            try:
+                log(f"🌐 Initializing Chrome browser...")
+                driver = create_driver()
+                log(f"✅ Browser started successfully")
+            except Exception as e:
+                log(f"❌ Browser startup failed: {e}")
+                import traceback
+                log(f"📋 Error details: {traceback.format_exc()[:300]}")
+                start_btn.config(state=tk.NORMAL)
+                return
+            
+            # Open Messenger
+            driver.get("https://www.messenger.com")
+            time.sleep(2)
+            if "login" in driver.current_url.lower():
+                log("📱 Please log in to Facebook Messenger. Waiting 20s...")
+                time.sleep(20)
 
         sent_count = 0
         failed_list = []
@@ -2745,79 +2969,6 @@ def start_sending():
                 if stop_event.is_set():
                     break
         
-        elif platform == "GreenAPI":
-            # Green API sending loop
-            # Get credentials
-            instance = entry_instance.get().strip()
-            token = entry_token.get().strip()
-            api_url = entry_api_url.get().strip()
-            media_url = entry_media_url.get().strip()
-            
-            if not instance or not token:
-                log("❌ Error: Missing Green API credentials")
-                start_btn.config(state=tk.NORMAL)
-                return
-
-            # Get selected country code
-            selected_country = country_code_var.get()
-            country_code = COUNTRY_CODES.get(selected_country, "+977")
-            log(f"🌍 Using country code: {country_code}")
-            
-            for i, row_data in enumerate(rows, start=1):
-                if stop_event.is_set():
-                    log("⏹ Stopped by user.")
-                    break
-                
-                target_phone, msg, name = row_data
-                
-                # Add country code if not already present
-                target_phone = str(target_phone).strip()
-                if not target_phone.startswith("+") and not target_phone.startswith("00"):
-                    target_phone = target_phone.lstrip("0")
-                    full_phone = country_code + target_phone
-                else:
-                    full_phone = target_phone
-                
-                log(f"[{i}/{len(rows)}] → {full_phone} ({name})")
-                stats_pending.config(text=str(len(rows) - i))
-                
-                try:
-                    success = False
-                    msg_id = ""
-                    
-                    if attachment_path:
-                        success, msg_id = send_file_greenapi(full_phone, attachment_path, msg, instance, token, media_url)
-                        type_str = "File"
-                    elif msg:
-                        success, msg_id = send_message_greenapi(full_phone, msg, instance, token, api_url)
-                        type_str = "Text"
-                    else:
-                        log(f"⚠️ Skipping {full_phone}: No message or attachment")
-                        continue
-                    
-                    if success:
-                        log(f"✅ {type_str} sent to {full_phone} (ID: {msg_id})")
-                        sent_count += 1
-                        stats_sent.config(text=str(sent_count))
-                    else:
-                        if "466" in msg_id:
-                            log(f"❌ Failed to send to {full_phone}: RATE LIMIT EXCEEDED (466)")
-                        else:
-                            log(f"❌ Failed to send to {full_phone}: {msg_id}")
-                        failed_list.append(full_phone)
-                        stats_failed.config(text=str(len(failed_list)))
-                        
-                except Exception as e:
-                    log(f"  ❌ ERROR {full_phone}: {e}")
-                    failed_list.append(full_phone)
-                    stats_failed.config(text=str(len(failed_list)))
-                
-                # Delay
-                time.sleep(delay_seconds)
-                
-                if stop_event.is_set():
-                    break
-        
         else:
             # WhatsApp sending loop
             # Get selected country code
@@ -2825,52 +2976,132 @@ def start_sending():
             country_code = COUNTRY_CODES.get(selected_country, "+977")
             log(f"🌍 Using country code: {country_code}")
             
-            for i, row_data in enumerate(rows, start=1):
-                if stop_event.is_set():
-                    log("⏹ Stopped by user.")
-                    break
+            # Check which WhatsApp method is selected
+            whatsapp_method = whatsapp_method_var.get()
+            
+            if whatsapp_method == "greenapi":
+                # Green API method
+                log("🚀 Using Green API method...")
                 
-                target_phone, msg, name = row_data
+                # Get and validate credentials
+                instance_id = greenapi_instance_entry.get().strip()
+                api_token = greenapi_token_entry.get().strip()
+                api_url = greenapi_url_entry.get().strip()
+                media_url = greenapi_media_url_entry.get().strip()
                 
-                # Add country code if not already present
-                target_phone = str(target_phone).strip()
-                if not target_phone.startswith("+") and not target_phone.startswith("00"):
-                    # Remove leading zeros if present
-                    target_phone = target_phone.lstrip("0")
-                    # Add country code
-                    full_phone = country_code + target_phone
-                else:
-                    full_phone = target_phone
+                if not instance_id or not api_token or not api_url or not media_url:
+                    log("❌ Green API credentials incomplete!")
+                    log("💡 Please enter all required fields:")
+                    log("   - Instance ID")
+                    log("   - API Token")
+                    log("   - API URL")
+                    log("   - Media URL")
+                    start_btn.config(state=tk.NORMAL)
+                    return
                 
-                log(f"[{i}/{len(rows)}] → {full_phone} ({name})")
-                stats_pending.config(text=str(len(rows) - i))
+                log(f"✅ Green API credentials validated")
+                log(f"📡 Instance ID: {instance_id}")
+                log(f"🌐 API URL: {api_url}")
+                log(f"📁 Media URL: {media_url}")
                 
-                try:
-                    ok = send_message_whatsapp(driver, full_phone, msg, log, stop_event, attachment_path, delay_seconds)
-                    if ok:
-                        sent_count += 1
-                        stats_sent.config(text=str(sent_count))
+                # Send messages using Green API
+                for i, row_data in enumerate(rows, start=1):
+                    if stop_event.is_set():
+                        log("⏹ Stopped by user.")
+                        break
+                    
+                    target_phone, msg, name = row_data
+                    
+                    # Add country code if not already present
+                    target_phone = str(target_phone).strip()
+                    if not target_phone.startswith("+") and not target_phone.startswith("00"):
+                        target_phone = target_phone.lstrip("0")
+                        full_phone = country_code + target_phone
                     else:
+                        full_phone = target_phone
+                    
+                    log(f"[{i}/{len(rows)}] → {full_phone} ({name})")
+                    stats_pending.config(text=str(len(rows) - i))
+                    
+                    try:
+                        ok = send_message_greenapi_unified(
+                            phone=full_phone,
+                            message=msg,
+                            instance_id=instance_id,
+                            api_token=api_token,
+                            api_url=api_url,
+                            media_url=media_url,
+                            log_fn=log,
+                            stop_event=stop_event,
+                            attachment_path=attachment_path,
+                            delay_seconds=delay_seconds
+                        )
+                        if ok:
+                            sent_count += 1
+                            stats_sent.config(text=str(sent_count))
+                        else:
+                            failed_list.append(target_phone)
+                            stats_failed.config(text=str(len(failed_list)))
+                    except Exception as e:
+                        log(f"  ❌ ERROR {target_phone}: {e}")
                         failed_list.append(target_phone)
                         stats_failed.config(text=str(len(failed_list)))
-                except Exception as e:
-                    log(f"  ❌ ERROR {target_phone}: {e}")
-                    failed_list.append(target_phone)
-                    stats_failed.config(text=str(len(failed_list)))
+                    
+                    if stop_event.is_set():
+                        break
+            
+            else:
+                # WebDriver method (original implementation)
+                log("🌐 Using WebDriver method...")
                 
-                # Delay is now handled inside send_message_whatsapp function with countdown
-                
-                if stop_event.is_set():
-                    break
+                for i, row_data in enumerate(rows, start=1):
+                    if stop_event.is_set():
+                        log("⏹ Stopped by user.")
+                        break
+                    
+                    target_phone, msg, name = row_data
+                    
+                    # Add country code if not already present
+                    target_phone = str(target_phone).strip()
+                    if not target_phone.startswith("+") and not target_phone.startswith("00"):
+                        # Remove leading zeros if present
+                        target_phone = target_phone.lstrip("0")
+                        # Add country code
+                        full_phone = country_code + target_phone
+                    else:
+                        full_phone = target_phone
+                    
+                    log(f"[{i}/{len(rows)}] → {full_phone} ({name})")
+                    stats_pending.config(text=str(len(rows) - i))
+                    
+                    try:
+                        ok = send_message_whatsapp(driver, full_phone, msg, log, stop_event, attachment_path, delay_seconds)
+                        if ok:
+                            sent_count += 1
+                            stats_sent.config(text=str(sent_count))
+                        else:
+                            failed_list.append(target_phone)
+                            stats_failed.config(text=str(len(failed_list)))
+                    except Exception as e:
+                        log(f"  ❌ ERROR {target_phone}: {e}")
+                        failed_list.append(target_phone)
+                        stats_failed.config(text=str(len(failed_list)))
+                    
+                    # Delay is now handled inside send_message_whatsapp function with countdown
+                    
+                    if stop_event.is_set():
+                        break
 
         log(f"✅ COMPLETE: {sent_count}/{len(rows)} sent | ❌ Failed: {len(failed_list)}")
         if failed_list:
-            log("📌 Failed contacts: " + ", ".join(failed_list[:5]))
+            log(f"Failed contacts: {', '.join(failed_list[:10])}{'...' if len(failed_list) > 10 else ''}")
         
-        if platform in ["WhatsApp", "Messenger"]:
+        # Close browser if it was created
+        if platform in ["WhatsApp", "Messenger"] and driver is not None:
             try:
                 driver.quit()
-            except Exception:
+                log("🔒 Browser closed.")
+            except:
                 pass
         
         start_btn.config(state=tk.NORMAL)
