@@ -1189,6 +1189,7 @@ def update_ui_for_platform():
 
 # --- Trial Expiration Check ---
 INSTALL_DATE = datetime.date(2025, 12, 5)
+#changes
 TRIAL_DAYS = 7
 
 def check_trial_expiration():
